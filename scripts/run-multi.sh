@@ -29,6 +29,38 @@ seed_provider_home() {
   fi
 }
 
+# Selective auth seeding: copy only credential files for a provider,
+# skipping conversation caches and session state. Use this instead of
+# seed_provider_home when JOB_ID isolation is active.
+# shellcheck disable=SC2329  # available for JOB_ID callers
+seed_provider_auth() {
+  local agent_home="$1"
+  local source_home="/home/node"
+
+  # Claude Code: auth tokens in ~/.config/claude/
+  if [ -d "${source_home}/.config/claude" ]; then
+    mkdir -p "${agent_home}/.config/claude"
+    cp -R "${source_home}/.config/claude"/. "${agent_home}/.config/claude"/
+  fi
+  # Claude Code: skip ~/.claude/ (auto-memory, project memories)
+
+  # Codex: only auth.json
+  if [ -f "${source_home}/.codex/auth.json" ]; then
+    mkdir -p "${agent_home}/.codex"
+    cp "${source_home}/.codex/auth.json" "${agent_home}/.codex/auth.json"
+  fi
+  # Codex: skip conversations/, cache/
+
+  # Gemini: copy top-level files only (likely credentials), skip subdirs
+  if [ -d "${source_home}/.gemini" ]; then
+    mkdir -p "${agent_home}/.gemini"
+    for f in "${source_home}/.gemini"/*; do
+      [ -f "$f" ] || continue
+      cp "$f" "${agent_home}/.gemini/"
+    done
+  fi
+}
+
 workspace_root="${WORKSPACE_ROOT:-/workspace}"
 email_domain="${AGENT_GIT_EMAIL_DOMAIN:-agents.local}"
 global_extra_prompt="${AGENT_EXTRA_PROMPT:-}"
