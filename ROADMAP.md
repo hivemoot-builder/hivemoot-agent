@@ -38,7 +38,7 @@ and the highest-value security improvement.
   not conversation caches or session state
 - Per-job cleanup on exit (workspace, tmp files, provider caches)
 
-Tracking: #6
+Tracking: #16
 
 ## M3: Controller MVP
 
@@ -51,7 +51,7 @@ multi-tenant deployments.
 - Runs on host (no docker.sock exposure)
 - Concurrency control via container lifecycle (replaces flock)
 
-Depends on: M2
+Depends on: M2 | Tracking: #17
 
 ## M4: Repo-scoped credentials
 
@@ -63,7 +63,7 @@ long-lived PATs for multi-tenant deployments.
 - Max recommended `AGENT_TIMEOUT_SECONDS` of 3000s with App tokens
 - PAT path preserved for local/dev fallback
 
-Depends on: M3
+Depends on: M3 | Tracking: #18
 
 ## M5: Production hardening
 
@@ -74,7 +74,7 @@ Runtime security constraints and deployment flexibility.
 - Containerized controller with restricted launcher API
 - Per-worker resource limits (CPU, memory, pids)
 
-Depends on: M3
+Depends on: M3 | Tracking: #19, #20
 
 ## Design principles
 
