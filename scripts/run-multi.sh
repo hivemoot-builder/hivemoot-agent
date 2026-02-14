@@ -32,7 +32,7 @@ seed_provider_home() {
 # Selective auth seeding: copy only credential files for a provider,
 # skipping conversation caches and session state. Use this instead of
 # seed_provider_home when JOB_ID isolation is active.
-# shellcheck disable=SC2329  # available for JOB_ID callers
+# shellcheck disable=SC2317,SC2329  # available for JOB_ID callers
 seed_provider_auth() {
   local agent_home="$1"
   local source_home="/home/node"
