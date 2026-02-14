@@ -1,8 +1,10 @@
 # Roadmap
 
-Current architecture direction for hivemoot-agent, organized by milestone.
+Current architecture direction for hivemoot-agent, organized by phase.
+Phases align 1:1 with sub-issues #16–#20 from the multi-repo
+discussion (#6).
 
-## M0: Foundation (shipped)
+## Phase 0: Foundation (shipped)
 
 The core runtime is functional: Docker container runs up to 10 agents
 in parallel against a single target repo, with per-agent isolation,
@@ -14,19 +16,7 @@ multi-provider support, and CI with security scanning.
 - ShellCheck, Hadolint, Trivy security scanning in CI
 - Role-based prompting via hivemoot CLI
 
-## M1: Multi-repo via Compose overrides (in progress)
-
-Support multiple target repos using one Compose service per repo.
-Each repo gets its own container, volumes, and lifecycle — strong
-isolation without new architecture.
-
-- `docker-compose.override.example.yml` with per-repo services
-- `WORKSPACE_ROOT` uniqueness validation
-- Tradeoff guidance in README
-
-Tracking: PR #11
-
-## M2: Worker boundary hardening
+## Phase 1: Worker boundary hardening — #16
 
 Make `run-once.sh` a proper ephemeral worker: one repo, one job,
 clean exit. This is the foundation for the controller architecture
@@ -37,10 +27,10 @@ and the highest-value security improvement.
 - Selective auth seeding: copy only provider credentials,
   not conversation caches or session state
 - Per-job cleanup on exit (workspace, tmp files, provider caches)
+- Threat model / isolation docs: document multi-repo-in-one-container
+  as a non-boundary and the recommended ephemeral worker model
 
-Tracking: #16
-
-## M3: Controller MVP
+## Phase 2: Controller MVP — #17
 
 External orchestrator that spawns fresh worker containers per job,
 replacing in-container multi-agent orchestration for production and
@@ -51,9 +41,9 @@ multi-tenant deployments.
 - Runs on host (no docker.sock exposure)
 - Concurrency control via container lifecycle (replaces flock)
 
-Depends on: M2 | Tracking: #17
+Depends on: Phase 1
 
-## M4: Repo-scoped credentials
+## Phase 3: Repo-scoped credentials — #18
 
 GitHub App installation tokens minted per repo per job, replacing
 long-lived PATs for multi-tenant deployments.
@@ -63,18 +53,24 @@ long-lived PATs for multi-tenant deployments.
 - Max recommended `AGENT_TIMEOUT_SECONDS` of 3000s with App tokens
 - PAT path preserved for local/dev fallback
 
-Depends on: M3 | Tracking: #18
+Depends on: Phase 2
 
-## M5: Production hardening
+## Phase 4: Worker security hardening — #19
 
-Runtime security constraints and deployment flexibility.
+Runtime security constraints for worker containers.
 
 - Seccomp profiles and `--cap-drop=ALL` policy
 - Optional gVisor support (with documented I/O performance tradeoffs)
-- Containerized controller with restricted launcher API
 - Per-worker resource limits (CPU, memory, pids)
 
-Depends on: M3 | Tracking: #19, #20
+Depends on: Phase 2
+
+## Phase 5: Containerized controller — #20
+
+Production deployment of the controller itself.
+
+- Containerized controller with restricted launcher API
+- Depends on: Phase 1, Phase 2
 
 ## Design principles
 
@@ -97,4 +93,4 @@ Depends on: M3 | Tracking: #19, #20
 - Should App tokens be required in controller mode, or should
   workers accept both token types?
 
-Discussion: #6
+Discussion: #6 | Sub-issues: #16, #17, #18, #19, #20
