@@ -44,7 +44,12 @@ seed_provider_auth() {
     mkdir -p "${agent_home}/.config/claude"
     cp -R "${source_home}/.config/claude"/. "${agent_home}/.config/claude"/
   fi
-  # Claude Code: skip ~/.claude/ (auto-memory, project memories)
+  # Claude Code: ~/.claude/ contains both auth and session state.
+  # Seed only the OAuth credential file; skip auto-memory and projects/.
+  if [ -f "${source_home}/.claude/.credentials.json" ]; then
+    mkdir -p "${agent_home}/.claude"
+    cp "${source_home}/.claude/.credentials.json" "${agent_home}/.claude/.credentials.json"
+  fi
 
   # Codex: only auth.json
   if [ -f "${source_home}/.codex/auth.json" ]; then
@@ -53,12 +58,14 @@ seed_provider_auth() {
   fi
   # Codex: skip conversations/, cache/
 
-  # Gemini: copy top-level files only (likely credentials), skip subdirs
+  # Gemini: seed only known auth/credential files; skip session state
+  # (memory.md, settings.json, state.json, telemetry, etc.)
   if [ -d "${source_home}/.gemini" ]; then
     mkdir -p "${agent_home}/.gemini"
-    for f in "${source_home}/.gemini"/*; do
-      [ -f "$f" ] || continue
-      cp "$f" "${agent_home}/.gemini/"
+    for f in oauth_creds.json google_accounts.json mcp-oauth-tokens.json mcp-oauth-tokens-v2.json .env; do
+      if [ -f "${source_home}/.gemini/$f" ]; then
+        cp "${source_home}/.gemini/$f" "${agent_home}/.gemini/$f"
+      fi
     done
   fi
 }

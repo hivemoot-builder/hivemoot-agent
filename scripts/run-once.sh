@@ -220,7 +220,12 @@ if [ -n "$job_id" ]; then
     mkdir -p "$job_home/.config/claude"
     cp -R "${HOME}/.config/claude"/. "$job_home/.config/claude"/
   fi
-  # Claude Code: skip ~/.claude/ (contains CLAUDE.md auto-memory, projects/)
+  # Claude Code: ~/.claude/ contains both auth and session state.
+  # Seed only the OAuth credential file; skip auto-memory and projects/.
+  if [ -f "${HOME}/.claude/.credentials.json" ]; then
+    mkdir -p "$job_home/.claude"
+    cp "${HOME}/.claude/.credentials.json" "$job_home/.claude/.credentials.json"
+  fi
 
   # Codex: auth.json is the credential file
   if [ -f "${HOME}/.codex/auth.json" ]; then
@@ -229,16 +234,13 @@ if [ -n "$job_id" ]; then
   fi
   # Codex: skip ~/.codex/conversations/, ~/.codex/cache/
 
-  # Gemini: copy the credentials directory (pending full audit of file layout)
+  # Gemini: seed only known auth/credential files; skip session state
+  # (memory.md, settings.json, state.json, telemetry, etc.)
   if [ -d "${HOME}/.gemini" ]; then
     mkdir -p "$job_home/.gemini"
-    # Seed known auth files; skip potential cache/session dirs
-    for f in "${HOME}/.gemini"/*; do
-      [ -e "$f" ] || continue
-      # Only copy regular files (likely config/creds), skip subdirectories
-      # which may contain conversation caches
-      if [ -f "$f" ]; then
-        cp "$f" "$job_home/.gemini/"
+    for f in oauth_creds.json google_accounts.json mcp-oauth-tokens.json mcp-oauth-tokens-v2.json .env; do
+      if [ -f "${HOME}/.gemini/$f" ]; then
+        cp "${HOME}/.gemini/$f" "$job_home/.gemini/$f"
       fi
     done
   fi
@@ -251,6 +253,24 @@ if [ -n "$job_id" ]; then
   export HOME="$job_home"
   log "Job HOME set to: ${job_home}"
 fi
+
+# Per-job cleanup: remove ephemeral state on exit when JOB_ID is set.
+# Registered early (before clone_repo) so that any failure between the
+# HOME redirect and provider launch still gets cleaned up.
+# shellcheck disable=SC2317,SC2329  # invoked via trap
+cleanup_job() {
+  if [ -z "$job_id" ]; then
+    return 0
+  fi
+  log "Cleaning up job state: JOB_ID=${job_id}"
+  # Remove job-scoped HOME (contains only seeded auth + session artifacts)
+  if [ -n "$job_home" ] && [ -d "$job_home" ]; then
+    rm -rf "$job_home"
+  fi
+  # Remove job-scoped tmp files
+  rm -f "/tmp/hivemoot-agent-${job_id}"* 2>/dev/null || true
+}
+trap cleanup_job EXIT
 
 if [ ! -f "$prompt_file" ]; then
   echo "Prompt file not found: $prompt_file" >&2
@@ -297,22 +317,6 @@ fi
 prompt="${system_prompt}
 
 ${user_message}"
-
-# Per-job cleanup: remove ephemeral state on exit when JOB_ID is set.
-# shellcheck disable=SC2317,SC2329  # invoked via trap
-cleanup_job() {
-  if [ -z "$job_id" ]; then
-    return 0
-  fi
-  log "Cleaning up job state: JOB_ID=${job_id}"
-  # Remove job-scoped HOME (contains only seeded auth + session artifacts)
-  if [ -n "$job_home" ] && [ -d "$job_home" ]; then
-    rm -rf "$job_home"
-  fi
-  # Remove job-scoped tmp files
-  rm -f "/tmp/hivemoot-agent-${job_id}"* 2>/dev/null || true
-}
-trap cleanup_job EXIT
 
 clone_repo() {
   local askpass
