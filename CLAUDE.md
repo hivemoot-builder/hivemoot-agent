@@ -24,7 +24,8 @@ entrypoint.sh → run-multi.sh → run-once.sh (per agent)
 - Start with `#!/usr/bin/env bash` and `set -euo pipefail`
 - Pass ShellCheck with no warnings (CI enforced)
 - Use the `log()` function for output: `log "message"` (prefix includes script name and timestamp)
-- Use `load_secret_from_file()` for secret loading (supports `VAR_FILE` pattern)
+- Use `load_secret_from_file()` in entrypoint/run-once for API key loading (`VAR_FILE` pattern)
+- Use `load_slot_token()` in run-multi/run-loop for per-agent GitHub token loading
 - Quote all variable expansions
 
 **CI checks** (all must pass):
@@ -42,7 +43,7 @@ entrypoint.sh → run-multi.sh → run-once.sh (per agent)
 ## Key patterns
 
 - **Provider abstraction**: `run-once.sh` has a `case "$provider"` block that maps to each CLI's flags. Claude and Gemini use `run_in_repo=1` (cd into repo before launch). Codex uses `--cd`.
-- **Secret handling**: `load_secret_from_file()` loads `VAR` from `VAR_FILE` if `VAR` is unset. Secrets go in `./secrets/` mounted read-only at `/run/secrets`.
+- **Secret handling**: `load_secret_from_file()` (entrypoint, run-once) loads `VAR` from `VAR_FILE` if `VAR` is unset. `load_slot_token()` (run-multi, run-loop) loads per-agent GitHub tokens from `AGENT_GITHUB_TOKEN_XX` or `_FILE`. Secrets go in `./secrets/` mounted read-only at `/run/secrets`.
 - **Agent isolation**: Each agent gets `$workspace_root/agents/<id>/repo`, `$workspace_root/runs/<id>/`, `$workspace_root/homes/<id>/` with copied provider auth state.
 - **Git auth**: Uses `GIT_ASKPASS` script that returns token from env. No credentials stored in git config.
 
