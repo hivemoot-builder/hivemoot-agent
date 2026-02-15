@@ -7,29 +7,9 @@ log() {
   printf '[run-loop %s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
 
-trim() {
-  local value="$1"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  printf '%s' "$value"
-}
-
-seed_provider_home() {
-  local shared_path="$1"
-  local agent_path="$2"
-
-  if [ ! -e "$shared_path" ]; then
-    return 0
-  fi
-
-  if [ -d "$shared_path" ]; then
-    mkdir -p "$agent_path"
-    cp -R "$shared_path"/. "$agent_path"/
-  else
-    mkdir -p "$(dirname "$agent_path")"
-    cp "$shared_path" "$agent_path"
-  fi
-}
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/lib.sh
+. "${SCRIPT_DIR}/lib.sh"
 
 # ── Configuration ──────────────────────────────────────────────────
 
@@ -72,87 +52,13 @@ if [ "$watch_mentions" = "1" ]; then
   if [ "$watch_poll_interval" -eq 0 ]; then
     echo "WATCH_POLL_INTERVAL must be > 0" >&2; exit 1
   fi
-  if [ -z "$target_repo" ]; then
-    echo "TARGET_REPO is required when WATCH_MENTIONS=1." >&2
-    exit 1
-  fi
 fi
+
+validate_target_repo "$target_repo"
 
 # ── Agent Slot Parsing ─────────────────────────────────────────────
 
-load_slot_token() {
-  local suffix="$1"
-  local token_var="AGENT_GITHUB_TOKEN_${suffix}"
-  local token_file_var="${token_var}_FILE"
-  local token="${!token_var:-}"
-  local token_file="${!token_file_var:-}"
-
-  if [ -n "$token" ] && [ -n "$token_file" ]; then
-    echo "Set either ${token_var} or ${token_file_var}, not both." >&2
-    exit 1
-  fi
-
-  if [ -z "$token" ] && [ -n "$token_file" ]; then
-    if [ ! -f "$token_file" ]; then
-      echo "${token_file_var} does not exist: ${token_file}" >&2
-      exit 1
-    fi
-    token="$(tr -d '\r\n' < "$token_file")"
-  fi
-
-  printf '%s' "$token"
-}
-
-declare -A seen_agents=()
-declare -a agent_ids=()
-declare -a agent_tokens=()
-
-for slot in $(seq 1 "$max_agents"); do
-  suffix="$(printf '%02d' "$slot")"
-  id_var="AGENT_ID_${suffix}"
-  token_var="AGENT_GITHUB_TOKEN_${suffix}"
-  token_file_var="${token_var}_FILE"
-
-  agent_id="$(trim "${!id_var:-}")"
-  token_inline="${!token_var:-}"
-  token_file="${!token_file_var:-}"
-
-  if [ -z "$agent_id" ] && [ -z "$token_inline" ] && [ -z "$token_file" ]; then
-    continue
-  fi
-
-  if [ -z "$agent_id" ]; then
-    echo "${id_var} is required when ${token_var} or ${token_file_var} is set." >&2
-    exit 1
-  fi
-
-  agent_token="$(load_slot_token "$suffix")"
-  if [ -z "$agent_token" ]; then
-    echo "Missing token for slot ${suffix}. Set ${token_var} or ${token_file_var}." >&2
-    exit 1
-  fi
-
-  case "$agent_id" in
-    ''|*[!a-zA-Z0-9._-]*)
-      echo "Invalid agent id: ${agent_id}" >&2
-      exit 1
-      ;;
-  esac
-
-  if [ -n "${seen_agents[$agent_id]:-}" ]; then
-    echo "Duplicate agent id detected: ${agent_id}" >&2
-    exit 1
-  fi
-  seen_agents["$agent_id"]=1
-
-  agent_ids+=("$agent_id")
-  agent_tokens+=("$agent_token")
-done
-
-if [ "${#agent_ids[@]}" -eq 0 ]; then
-  echo "No agents configured. Set AGENT_ID_01 + AGENT_GITHUB_TOKEN_01 (up to _10)." >&2
-  exit 1
-fi
+parse_agent_slots "$max_agents"
 
 agent_count="${#agent_ids[@]}"
 
@@ -179,116 +85,11 @@ done
 
 # ── Preflight ──────────────────────────────────────────────────────
 
-preflight_check() {
-  local failures=0
-
-  log "Pre-flight: validating configuration"
-
-  local provider="${AGENT_PROVIDER:-claude}"
-  local auth_mode="${AGENT_AUTH_MODE:-auto}"
-  local prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/default.md}"
-
-  if ! command -v "$provider" >/dev/null 2>&1; then
-    echo "Pre-flight: ${provider} CLI is not installed." >&2
-    failures=$((failures + 1))
-  fi
-
-  if ! command -v hivemoot >/dev/null 2>&1; then
-    echo "Pre-flight: hivemoot CLI is not installed." >&2
-    failures=$((failures + 1))
-  fi
-
-  if [ ! -f "$prompt_file" ]; then
-    echo "Pre-flight: prompt file not found: ${prompt_file}" >&2
-    failures=$((failures + 1))
-  fi
-
-  # Provider auth check
-  case "$provider" in
-    codex)
-      local resolved="$auth_mode"
-      [ "$resolved" = "auto" ] && resolved=$( [ -n "${OPENAI_API_KEY:-}" ] && echo "api_key" || echo "subscription" )
-      if [ "$resolved" = "api_key" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
-        echo "Pre-flight: OPENAI_API_KEY missing for codex + api_key mode." >&2
-        failures=$((failures + 1))
-      fi
-      ;;
-    gemini)
-      local resolved="$auth_mode"
-      [ "$resolved" = "auto" ] && resolved=$( { [ -n "${GOOGLE_API_KEY:-}" ] || [ -n "${GEMINI_API_KEY:-}" ]; } && echo "api_key" || echo "subscription" )
-      if [ "$resolved" = "api_key" ] && [ -z "${GOOGLE_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ]; then
-        echo "Pre-flight: GOOGLE_API_KEY/GEMINI_API_KEY missing for gemini + api_key mode." >&2
-        failures=$((failures + 1))
-      fi
-      ;;
-    claude)
-      local resolved="$auth_mode"
-      [ "$resolved" = "auto" ] && resolved=$( [ -n "${ANTHROPIC_API_KEY:-}" ] && echo "api_key" || echo "subscription" )
-      if [ "$resolved" = "api_key" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-        echo "Pre-flight: ANTHROPIC_API_KEY missing for claude + api_key mode." >&2
-        failures=$((failures + 1))
-      fi
-      ;;
-  esac
-
-  # Validate agent tokens against GitHub API
-  for index in "${!agent_ids[@]}"; do
-    local aid="${agent_ids[$index]}"
-    local tok="${agent_tokens[$index]}"
-
-    if [ "$watch_mentions" = "1" ]; then
-      # Mention watching requires user tokens (for notifications API)
-      if ! GH_TOKEN="$tok" gh api user --jq .login >/dev/null 2>&1; then
-        echo "Pre-flight: token for agent '${aid}' is not a valid user token (required for WATCH_MENTIONS=1)." >&2
-        failures=$((failures + 1))
-        continue
-      fi
-    else
-      # Periodic-only mode accepts both user and installation tokens
-      if ! GH_TOKEN="$tok" gh api user --jq .login >/dev/null 2>&1; then
-        if ! GH_TOKEN="$tok" gh api installation --jq .id >/dev/null 2>&1; then
-          echo "Pre-flight: token for agent '${aid}' is invalid or expired." >&2
-          failures=$((failures + 1))
-          continue
-        fi
-      fi
-    fi
-
-    if [ -n "$target_repo" ]; then
-      if ! GH_TOKEN="$tok" gh api "repos/${target_repo}" --jq .full_name >/dev/null 2>&1; then
-        echo "Pre-flight: token for agent '${aid}' cannot access ${target_repo}." >&2
-        failures=$((failures + 1))
-      fi
-    fi
-  done
-
-  if [ "$failures" -gt 0 ]; then
-    echo "Pre-flight: ${failures} check(s) failed." >&2
-    exit 1
-  fi
-
-  log "Pre-flight: all checks passed (agents=${agent_count} repo=${target_repo:-unset})"
-}
-
-prepare_hivemoot_cli() {
-  local update_mode="${HIVEMOOT_CLI_UPDATE:-auto}"
-  local spec="@hivemoot-dev/cli@${HIVEMOOT_CLI_VERSION:-latest}"
-
-  if [ "$update_mode" = "skip" ]; then
-    log "Pre-run: skipping hivemoot CLI update (HIVEMOOT_CLI_UPDATE=skip)"
-  else
-    log "Pre-run: updating hivemoot CLI (${spec})"
-    npm install -g "$spec"
-    hash -r
-  fi
-
-  if ! command -v hivemoot >/dev/null 2>&1; then
-    echo "hivemoot CLI is not available." >&2
-    exit 1
-  fi
-}
-
-preflight_check
+if [ "$watch_mentions" = "1" ]; then
+  preflight_check 1
+else
+  preflight_check 0
+fi
 prepare_hivemoot_cli
 
 # ── Agent Home Setup ──────────────────────────────────────────────
@@ -296,28 +97,7 @@ prepare_hivemoot_cli
 for index in "${!agent_ids[@]}"; do
   aid="${agent_ids[$index]}"
   agent_home="${workspace_root}/homes/${aid}"
-
-  mkdir -p \
-    "$agent_home/.config" \
-    "$agent_home/.cache" \
-    "$agent_home/.local" \
-    "$agent_home/.local/share"
-  chmod 700 \
-    "$agent_home/.config" \
-    "$agent_home/.cache" \
-    "$agent_home/.local" \
-    "$agent_home/.local/share" 2>/dev/null || true
-
-  # Copy shared provider auth state into each agent home
-  seed_provider_home "/home/node/.codex" "$agent_home/.codex"
-  seed_provider_home "/home/node/.gemini" "$agent_home/.gemini"
-  seed_provider_home "/home/node/.claude" "$agent_home/.claude"
-  seed_provider_home "/home/node/.config/claude" "$agent_home/.config/claude"
-
-  # Ensure agent subprocesses can find npm-installed binaries
-  # shellcheck disable=SC2016
-  printf 'export PATH="/usr/local/share/npm-global/bin:${PATH}"\n' \
-    > "$agent_home/.profile"
+  setup_agent_home "$agent_home"
 done
 
 # ── Lock & Run Infrastructure ──────────────────────────────────────
@@ -378,17 +158,8 @@ try_run_agent() {
 
     log "${agent_id}: lock acquired, starting run"
 
-    export HOME="$agent_home"
-    export WORKSPACE_ROOT="$agent_workspace"
-    export REPO_DIR="$agent_repo"
-    export LOG_DIR="$agent_log_dir"
-    export AGENT_GITHUB_TOKEN_FILE="$token_file"
-    export AGENT_GIT_NAME="$agent_id"
-    export AGENT_GIT_EMAIL="${agent_id}@${email_domain}"
-    export HIVEMOOT_BUZZ_ROLE="$agent_id"
-    export AGENT_EXTRA_PROMPT="$extra_prompt"
-
-    unset AGENT_GITHUB_TOKEN GITHUB_TOKEN GH_TOKEN
+    export_agent_env "$agent_home" "$agent_workspace" "$agent_repo" \
+      "$agent_log_dir" "$token_file" "$agent_id" "$email_domain" "$extra_prompt"
 
     agent_exit=0
     /opt/hivemoot-agent/scripts/run-once.sh || agent_exit=$?
