@@ -120,7 +120,7 @@ parse_agent_slots() {
     fi
 
     case "$agent_id" in
-      ''|*[!a-zA-Z0-9._-]*)
+      ''|*[!a-zA-Z0-9_-]*)
         echo "Invalid agent id: ${agent_id}" >&2
         exit 1
         ;;
