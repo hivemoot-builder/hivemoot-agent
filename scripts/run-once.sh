@@ -273,9 +273,11 @@ cleanup_job() {
     return 0
   fi
   log "Cleaning up job state: JOB_ID=${job_id}"
-  # Remove job-scoped HOME (contains only seeded auth + session artifacts)
-  if [ -d "$job_home" ]; then
-    rm -rf "$job_home"
+  # Remove the entire job-scoped directory (repo, logs, HOME).
+  # This prevents accumulation when JOB_ID is auto-generated for standalone runs.
+  local job_root="${workspace_root}/${job_id}"
+  if [ -d "$job_root" ]; then
+    rm -rf "$job_root"
   fi
   # Remove job-scoped tmp files
   if [ -n "$job_id" ]; then
