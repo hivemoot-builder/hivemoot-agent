@@ -74,6 +74,11 @@ jobs:
                 ref: pr.head.sha,
               });
 
+              if (checks.check_runs.length === 0) {
+                console.log('  Skip: no check runs found for HEAD SHA');
+                continue;
+              }
+
               const pending = checks.check_runs.filter(
                 c => c.status !== 'completed'
               );
