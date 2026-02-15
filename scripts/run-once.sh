@@ -76,6 +76,14 @@ process.stdout.write(parts.join("\n\n"));
   printf '%s' "$role_prompt_block"
 }
 
+_cleanup_files=()
+cleanup_once() {
+  for f in "${_cleanup_files[@]-}"; do
+    rm -f "$f" 2>/dev/null || true
+  done
+}
+trap cleanup_once EXIT
+
 required_cmds=(git gh)
 for cmd in "${required_cmds[@]}"; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -243,6 +251,7 @@ ${user_message}"
 clone_repo() {
   local askpass
   askpass="$(mktemp)"
+  _cleanup_files+=("$askpass")
   cat > "$askpass" <<'EOF'
 #!/usr/bin/env sh
 case "$1" in
@@ -401,6 +410,7 @@ log "Starting provider=${provider} auth_mode=${auth_mode} repo=${target_repo}"
 # Capture exit code via temp file instead of PIPESTATUS so the tee pipe
 # cannot silently swallow the command's real exit code.
 _ec_file="$(mktemp)"
+_cleanup_files+=("$_ec_file")
 set +e
 if [ "$run_in_repo" = "1" ]; then
   if command -v timeout >/dev/null 2>&1; then
