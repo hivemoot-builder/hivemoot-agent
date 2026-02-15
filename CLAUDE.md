@@ -6,7 +6,7 @@ hivemoot-agent is a Docker-based runner for autonomous AI agents that contribute
 
 ## Architecture
 
-```
+```text
 entrypoint.sh → run-multi.sh → run-once.sh (per agent)
                 run-loop.sh  → run-once.sh (periodic + mention-watch)
 ```
