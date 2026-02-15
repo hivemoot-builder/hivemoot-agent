@@ -77,6 +77,7 @@ process.stdout.write(parts.join("\n\n"));
 }
 
 _cleanup_files=()
+# shellcheck disable=SC2317,SC2329  # invoked via trap
 cleanup_once() {
   for f in "${_cleanup_files[@]-}"; do
     rm -f "$f" 2>/dev/null || true
