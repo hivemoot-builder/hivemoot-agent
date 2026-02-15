@@ -120,7 +120,6 @@ auth_mode="${AGENT_AUTH_MODE:-auto}"
 hivemoot_buzz_role="${HIVEMOOT_BUZZ_ROLE:-}"
 target_repo="${TARGET_REPO:-}"
 workspace_root="${WORKSPACE_ROOT:-/workspace}"
-job_id="${JOB_ID:-}"
 fresh_clone="${FRESH_CLONE:-1}"
 prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/default.md}"
 extra_prompt="${AGENT_EXTRA_PROMPT:-}"
@@ -129,13 +128,24 @@ timeout_secs="${AGENT_TIMEOUT_SECONDS:-1800}"
 agent_git_name="${AGENT_GIT_NAME:-}"
 agent_git_email="${AGENT_GIT_EMAIL:-}"
 
-# When JOB_ID is set, namespace workspace/HOME/logs under the job ID
-# so consecutive runs against different repos or jobs get isolated state.
-if [ -n "$job_id" ]; then
-  repo_dir="${REPO_DIR:-${workspace_root}/${job_id}/repo}"
-  log_dir="${LOG_DIR:-${workspace_root}/${job_id}/runs}"
+# When REPO_DIR/LOG_DIR are set externally (run-multi.sh, run-loop.sh),
+# isolation is handled by the caller. Otherwise, generate a JOB_ID to
+# namespace workspace/HOME/logs so every standalone run is isolated.
+managed_mode=0
+if [ -n "${REPO_DIR:-}" ] || [ -n "${LOG_DIR:-}" ]; then
+  managed_mode=1
+fi
+
+job_id="${JOB_ID:-}"
+if [ -z "$job_id" ] && [ "$managed_mode" -eq 0 ]; then
+  job_id="$(date '+%Y%m%d-%H%M%S')-$$"
+fi
+
+if [ -n "$job_id" ] && [ "$managed_mode" -eq 0 ]; then
+  repo_dir="${workspace_root}/${job_id}/repo"
+  log_dir="${workspace_root}/${job_id}/runs"
   job_home="${workspace_root}/${job_id}/home"
-  log "Job isolation enabled: JOB_ID=${job_id}"
+  log "Job isolation: JOB_ID=${job_id}"
 else
   repo_dir="${REPO_DIR:-${workspace_root}/repo}"
   log_dir="${LOG_DIR:-${workspace_root}/runs}"
@@ -206,10 +216,10 @@ log "GitHub token mode detected: ${token_mode}"
 
 mkdir -p "$workspace_root" "$log_dir"
 
-# When JOB_ID is set, create an isolated HOME directory for this job and
-# seed only auth credentials from the current HOME (not conversation
-# caches or session state). This prevents context bleeding between jobs.
-if [ -n "$job_id" ]; then
+# Create an isolated HOME for this job and seed only auth credentials
+# (not conversation caches or session state). Skipped in managed mode
+# where the caller (run-multi.sh / run-loop.sh) handles HOME isolation.
+if [ -n "$job_home" ]; then
   mkdir -p "$job_home/.config" "$job_home/.cache" "$job_home/.local/share"
   chmod 700 "$job_home" "$job_home/.config" "$job_home/.cache" \
     "$job_home/.local" "$job_home/.local/share" 2>/dev/null || true
@@ -259,16 +269,18 @@ fi
 # HOME redirect and provider launch still gets cleaned up.
 # shellcheck disable=SC2317,SC2329  # invoked via trap
 cleanup_job() {
-  if [ -z "$job_id" ]; then
+  if [ -z "$job_home" ]; then
     return 0
   fi
   log "Cleaning up job state: JOB_ID=${job_id}"
   # Remove job-scoped HOME (contains only seeded auth + session artifacts)
-  if [ -n "$job_home" ] && [ -d "$job_home" ]; then
+  if [ -d "$job_home" ]; then
     rm -rf "$job_home"
   fi
   # Remove job-scoped tmp files
-  rm -f "/tmp/hivemoot-agent-${job_id}"* 2>/dev/null || true
+  if [ -n "$job_id" ]; then
+    rm -f "/tmp/hivemoot-agent-${job_id}"* 2>/dev/null || true
+  fi
 }
 trap cleanup_job EXIT
 
