@@ -1,26 +1,30 @@
 name: Auto-merge
 
 on:
-  # Trigger when merge-ready label is added or CI completes on a labeled PR
+  # Trigger when merge-ready label is added
   pull_request_target:
     types: [labeled]
-  check_suite:
+  # Trigger when CI workflow completes (check_suite doesn't fire for Actions)
+  workflow_run:
+    workflows: ["CI"]
     types: [completed]
 
 permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: auto-merge
+  cancel-in-progress: false
+
 jobs:
   auto-merge:
     name: Auto-merge ready PRs
     runs-on: ubuntu-latest
-    # Only run when the triggering label is merge-ready, or when a check suite
-    # completes (to catch PRs that were labeled before CI finished).
     if: >-
       (github.event_name == 'pull_request_target' &&
        github.event.label.name == 'hivemoot:merge-ready') ||
-      github.event_name == 'check_suite'
+      github.event_name == 'workflow_run'
     steps:
       - name: Find and merge ready PRs
         uses: actions/github-script@v7
@@ -90,11 +94,11 @@ jobs:
               }
 
               // Verify minimum approvals (2, matching hivemoot.yml)
-              const { data: reviews } = await github.rest.pulls.listReviews({
-                owner,
-                repo,
-                pull_number: pr.number,
-              });
+              // Paginate to handle PRs with many reviews
+              const reviews = await github.paginate(
+                github.rest.pulls.listReviews,
+                { owner, repo, pull_number: pr.number, per_page: 100 }
+              );
 
               const approvals = new Set();
               for (const review of reviews) {
@@ -102,15 +106,19 @@ jobs:
                   approvals.add(review.user.login);
                 } else if (review.state === 'CHANGES_REQUESTED') {
                   approvals.delete(review.user.login);
+                } else if (review.state === 'DISMISSED') {
+                  approvals.delete(review.user.login);
                 }
               }
+              // Exclude PR author self-approval
+              approvals.delete(detail.user.login);
 
               if (approvals.size < 2) {
                 console.log(`  Skip: only ${approvals.size} approvals (need 2)`);
                 continue;
               }
 
-              // Merge
+              // Merge with SHA pinning to prevent TOCTOU race
               console.log(`  Merging PR #${pr.number} (${approvals.size} approvals)`);
               try {
                 await github.rest.pulls.merge({
@@ -118,6 +126,7 @@ jobs:
                   repo,
                   pull_number: pr.number,
                   merge_method: 'squash',
+                  sha: detail.head.sha,
                 });
                 console.log(`  Merged successfully`);
 
