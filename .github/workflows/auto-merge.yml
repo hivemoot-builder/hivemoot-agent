@@ -93,8 +93,14 @@ jobs:
                 continue;
               }
 
-              // Verify minimum approvals (2, matching hivemoot.yml)
-              // Paginate to handle PRs with many reviews
+              // Verify minimum approvals (2, matching hivemoot.yml).
+              // Only count approvals from trusted associations (collaborators,
+              // org members, owners) to prevent external accounts from
+              // satisfying the approval gate on public repos.
+              const TRUSTED_ASSOCIATIONS = new Set([
+                'COLLABORATOR', 'MEMBER', 'OWNER',
+              ]);
+
               const reviews = await github.paginate(
                 github.rest.pulls.listReviews,
                 { owner, repo, pull_number: pr.number, per_page: 100 }
@@ -102,6 +108,9 @@ jobs:
 
               const approvals = new Set();
               for (const review of reviews) {
+                if (!TRUSTED_ASSOCIATIONS.has(review.author_association)) {
+                  continue;
+                }
                 if (review.state === 'APPROVED') {
                   approvals.add(review.user.login);
                 } else if (review.state === 'CHANGES_REQUESTED') {
