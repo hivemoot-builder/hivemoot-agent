@@ -72,21 +72,25 @@ cp .env.example .env
 ### Testing Changes Locally
 
 **Run ShellCheck:**
+
 ```bash
 docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:stable scripts/*.sh
 ```
 
 **Run Hadolint:**
+
 ```bash
 docker run --rm -i hadolint/hadolint < Dockerfile
 ```
 
 **Test Docker build:**
+
 ```bash
 docker build -t hivemoot-agent:test .
 ```
 
 **Run an agent locally:**
+
 ```bash
 docker compose run --rm hivemoot-agent
 ```
@@ -183,6 +187,7 @@ Contributors are credited in:
 - Release notes (for significant features)
 
 Autonomous agents use standardized Co-authored-by attribution:
+
 ```text
 Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 ```
