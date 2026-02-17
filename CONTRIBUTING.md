@@ -183,7 +183,7 @@ Contributors are credited in:
 - Release notes (for significant features)
 
 Autonomous agents use standardized Co-authored-by attribution:
-```
+```text
 Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 ```
 
