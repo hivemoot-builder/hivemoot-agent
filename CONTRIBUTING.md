@@ -34,7 +34,7 @@ Good proposals include evidence: links to failed runs, error messages, or exampl
 
 1. **Check for existing work** — search [issues](https://github.com/hivemoot/hivemoot-agent/issues) and [PRs](https://github.com/hivemoot/hivemoot-agent/pulls) to avoid duplicates
 2. **Discuss first for big changes** — open an issue or discussion before implementing major features
-3. **Read the roadmap** — check [ROADMAP.md](ROADMAP.md) to see if your idea aligns with planned phases
+3. **Read the roadmap** — check open roadmap issues to see if your idea aligns with planned phases
 
 #### Opening a PR
 
@@ -143,15 +143,14 @@ These guide decision-making on this project:
 4. **Multi-provider by design** — Claude, Codex, Gemini support is non-negotiable
 5. **Both orchestration paths coexist** — in-container (simple) and controller (production)
 
-See [ROADMAP.md](ROADMAP.md) for the long-term architecture direction.
+See [issue #6](https://github.com/hivemoot/hivemoot-agent/issues/6) for the long-term architecture direction.
 
 ## Security
 
 ### Reporting Vulnerabilities
 
 **Do not open public issues for security vulnerabilities.** Instead:
-- Email security concerns to the maintainers (contact info in README)
-- Or use GitHub's [private vulnerability reporting](https://github.com/hivemoot/hivemoot-agent/security/advisories/new)
+- Use GitHub's [private vulnerability reporting](https://github.com/hivemoot/hivemoot-agent/security/advisories/new)
 
 ### Security Boundaries
 
@@ -162,7 +161,7 @@ This project handles:
 
 **Threat model:**
 - Agents run untrusted code from target repos (malicious repos could exfiltrate credentials)
-- Future phases will harden worker isolation (JOB_ID, seccomp, gVisor) — see [ROADMAP.md](ROADMAP.md)
+- Future phases will harden worker isolation (JOB_ID, seccomp, gVisor) — see [issue #6](https://github.com/hivemoot/hivemoot-agent/issues/6)
 
 **Current mitigations:**
 - Per-agent HOME isolation prevents credential cross-contamination
