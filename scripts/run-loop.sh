@@ -53,6 +53,9 @@ seed_provider_auth() {
     mkdir -p "${agent_home}/.claude"
     cp "${source_home}/.claude/.credentials.json" "${agent_home}/.claude/.credentials.json"
   fi
+  if [ -f "${source_home}/.claude.json" ]; then
+    cp "${source_home}/.claude.json" "${agent_home}/.claude.json"
+  fi
 
   # Codex: only auth.json
   if [ -f "${source_home}/.codex/auth.json" ]; then
