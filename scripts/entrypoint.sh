@@ -24,6 +24,8 @@ done
 
 if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
   mkdir -p "${HOME}/.claude"
+  # Use a far-future local expiry so Claude Code treats the bootstrap token
+  # as non-expired; actual token lifetime is enforced server-side.
   cat > "${HOME}/.claude/.credentials.json" <<CREDS
 {"claudeAiOauth":{"accessToken":"${CLAUDE_CODE_OAUTH_TOKEN}","expiresAt":4102444800000}}
 CREDS
