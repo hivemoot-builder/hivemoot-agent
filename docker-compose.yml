@@ -124,6 +124,7 @@ services:
     entrypoint: ["bash", "-lc"]
     command:
       - |
+        set -euo pipefail
         claude setup-token
         cat > "${HOME}/.claude.json" <<'JSON'
         {"hasCompletedOnboarding": true}
