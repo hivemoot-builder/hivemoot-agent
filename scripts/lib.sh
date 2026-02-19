@@ -159,6 +159,17 @@ validate_agent_id() {
   esac
 }
 
+validate_job_id() {
+  local job_id="$1"
+
+  case "$job_id" in
+    ''|*[!a-zA-Z0-9_-]*)
+      echo "Invalid JOB_ID: ${job_id}" >&2
+      exit 1
+      ;;
+  esac
+}
+
 load_slot_token() {
   local suffix="$1"
   local token_var="AGENT_GITHUB_TOKEN_${suffix}"

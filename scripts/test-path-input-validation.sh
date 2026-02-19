@@ -61,3 +61,23 @@ assert_fails_with \
   env TARGET_REPO=owner/repo AGENT_ID_01=.. AGENT_GITHUB_TOKEN_01=dummy bash scripts/run-loop.sh
 
 echo "PASS: workspace root and agent ID validation checks"
+
+echo "Running JOB_ID validation checks"
+
+assert_fails_with \
+  "Invalid JOB_ID: ../../etc" \
+  env TARGET_REPO=owner/repo JOB_ID=../../etc bash scripts/run-once.sh
+
+assert_fails_with \
+  "Invalid JOB_ID: /abs/path" \
+  env TARGET_REPO=owner/repo JOB_ID=/abs/path bash scripts/run-once.sh
+
+assert_fails_with \
+  "Invalid JOB_ID: job id with spaces" \
+  env TARGET_REPO=owner/repo "JOB_ID=job id with spaces" bash scripts/run-once.sh
+
+assert_fails_with \
+  'Invalid JOB_ID: job$id' \
+  env TARGET_REPO=owner/repo 'JOB_ID=job$id' bash scripts/run-once.sh
+
+echo "PASS: JOB_ID validation checks"
