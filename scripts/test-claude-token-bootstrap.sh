@@ -25,8 +25,12 @@ echo "Running Claude token bootstrap checks"
 
 tmp_home="$(mktemp -d)"
 tmp_stderr="$(mktemp)"
+tmp_shared_home="$(mktemp -d)"
+tmp_agent_home="$(mktemp -d)"
 cleanup() {
   rm -rf "$tmp_home"
+  rm -rf "$tmp_shared_home"
+  rm -rf "$tmp_agent_home"
   rm -f "$tmp_stderr"
 }
 trap cleanup EXIT
@@ -56,5 +60,28 @@ assert_file_content_exact \
 
 assert_file_mode_600 "$tmp_home/.claude/.credentials.json"
 assert_file_mode_600 "$tmp_home/.claude.json"
+
+mkdir -p "$tmp_shared_home/.claude"
+cat > "$tmp_shared_home/.claude/.credentials.json" <<'JSON'
+{"claudeAiOauth":{"accessToken":"managed-mode-token","expiresAt":4102444800000}}
+JSON
+cat > "$tmp_shared_home/.claude.json" <<'JSON'
+{"hasCompletedOnboarding":true}
+JSON
+
+# shellcheck source=scripts/lib.sh
+. scripts/lib.sh
+seed_shared_provider_state "$tmp_agent_home" "$tmp_shared_home"
+
+[ -f "$tmp_agent_home/.claude/.credentials.json" ] || fail "missing managed-mode credentials file"
+[ -f "$tmp_agent_home/.claude.json" ] || fail "missing managed-mode onboarding file"
+
+assert_file_content_exact \
+  "$tmp_agent_home/.claude/.credentials.json" \
+  '{"claudeAiOauth":{"accessToken":"managed-mode-token","expiresAt":4102444800000}}'
+
+assert_file_content_exact \
+  "$tmp_agent_home/.claude.json" \
+  '{"hasCompletedOnboarding":true}'
 
 echo "PASS: Claude token bootstrap checks"
