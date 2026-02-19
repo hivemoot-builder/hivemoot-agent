@@ -5,33 +5,16 @@ log() {
   printf '[run-multi %s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
 
-trim() {
-  local value="$1"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  printf '%s' "$value"
-}
-
-seed_provider_home() {
-  local shared_path="$1"
-  local agent_path="$2"
-
-  if [ ! -e "$shared_path" ]; then
-    return 0
-  fi
-
-  if [ -d "$shared_path" ]; then
-    mkdir -p "$agent_path"
-    cp -R "$shared_path"/. "$agent_path"/
-  else
-    mkdir -p "$(dirname "$agent_path")"
-    cp "$shared_path" "$agent_path"
-  fi
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=scripts/lib.sh
+. "${SCRIPT_DIR}/lib.sh"
+# shellcheck source=scripts/opencode-helpers.sh
+. "${SCRIPT_DIR}/opencode-helpers.sh"
 
 workspace_root="${WORKSPACE_ROOT:-/workspace}"
 email_domain="${AGENT_GIT_EMAIL_DOMAIN:-agents.local}"
 global_extra_prompt="${AGENT_EXTRA_PROMPT:-}"
+target_repo="${TARGET_REPO:-}"
 launch_jitter_min="${LAUNCH_JITTER_MIN_SECS:-120}"
 launch_jitter_max="${LAUNCH_JITTER_MAX_SECS:-180}"
 max_agents=10
@@ -47,6 +30,8 @@ if [ "$launch_jitter_max" -lt "$launch_jitter_min" ]; then
   echo "LAUNCH_JITTER_MAX_SECS (${launch_jitter_max}) must be >= LAUNCH_JITTER_MIN_SECS (${launch_jitter_min})" >&2
   exit 1
 fi
+
+validate_target_repo "$target_repo"
 
 declare -a temp_token_files=()
 shutdown_requested=0
@@ -71,29 +56,6 @@ handle_shutdown() {
 trap cleanup_temp_tokens EXIT
 trap handle_shutdown TERM INT
 
-load_slot_token() {
-  local suffix="$1"
-  local token_var="AGENT_GITHUB_TOKEN_${suffix}"
-  local token_file_var="${token_var}_FILE"
-  local token="${!token_var:-}"
-  local token_file="${!token_file_var:-}"
-
-  if [ -n "$token" ] && [ -n "$token_file" ]; then
-    echo "Set either ${token_var} or ${token_file_var}, not both." >&2
-    exit 1
-  fi
-
-  if [ -z "$token" ] && [ -n "$token_file" ]; then
-    if [ ! -f "$token_file" ]; then
-      echo "${token_file_var} does not exist: ${token_file}" >&2
-      exit 1
-    fi
-    token="$(tr -d '\r\n' < "$token_file")"
-  fi
-
-  printf '%s' "$token"
-}
-
 shuffle_agents() {
   local i=0
   local j=0
@@ -110,32 +72,6 @@ shuffle_agents() {
     agent_ids[j]="$tmp_id"
     agent_tokens[j]="$tmp_token"
   done
-}
-
-prepare_hivemoot_cli() {
-  local update_mode="${HIVEMOOT_CLI_UPDATE:-auto}"
-  local spec="@hivemoot-dev/cli@${HIVEMOOT_CLI_VERSION:-latest}"
-
-  if [ "$update_mode" = "skip" ]; then
-    log "Pre-run: skipping hivemoot CLI update (HIVEMOOT_CLI_UPDATE=skip)"
-  else
-    log "Pre-run: updating hivemoot CLI (${spec})"
-    npm install -g "$spec"
-    hash -r
-  fi
-
-  if ! command -v hivemoot >/dev/null 2>&1; then
-    echo "hivemoot CLI is not available. Rebuild the image or set HIVEMOOT_CLI_UPDATE=auto." >&2
-    exit 1
-  fi
-
-  local version_line=""
-  version_line="$(hivemoot --version 2>/dev/null | head -n 1 || true)"
-  if [ -n "$version_line" ]; then
-    log "Pre-run: hivemoot CLI ready (${version_line})"
-  else
-    log "Pre-run: hivemoot CLI ready"
-  fi
 }
 
 declare -A seen_agents=()
@@ -201,11 +137,10 @@ shuffle_agents
 
 agent_count="${#agent_ids[@]}"
 log "Starting ${agent_count} agents in parallel (launch jitter: ${launch_jitter_min}-${launch_jitter_max}s)"
-log "Target repo: ${TARGET_REPO:-unset}"
+log "Target repo: ${target_repo}"
 log "Randomized launch order: ${agent_ids[*]}"
 
 preflight_check() {
-  local target_repo="${TARGET_REPO:-}"
   local provider="${AGENT_PROVIDER:-claude}"
   local auth_mode="${AGENT_AUTH_MODE:-auto}"
   local prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/default.md}"
@@ -248,6 +183,56 @@ preflight_check() {
       [ "$resolved" = "auto" ] && resolved=$( [ -n "${ANTHROPIC_API_KEY:-}" ] && echo "api_key" || echo "subscription" )
       if [ "$resolved" = "api_key" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
         echo "Pre-flight: ANTHROPIC_API_KEY missing for claude + api_key mode." >&2
+        failures=$((failures + 1))
+      fi
+      ;;
+    kilo)
+      if [ -z "${KILOCODE_TOKEN:-}" ]; then
+        if [ -z "${KILO_PROVIDER:-}" ]; then
+          echo "Pre-flight: KILO_PROVIDER is required for kilo (unless KILOCODE_TOKEN is set for gateway mode)." >&2
+          failures=$((failures + 1))
+        else
+          case "${KILO_PROVIDER}" in
+            anthropic)
+              if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+                echo "Pre-flight: ANTHROPIC_API_KEY missing for KILO_PROVIDER=anthropic." >&2
+                failures=$((failures + 1))
+              fi
+              ;;
+            openai)
+              if [ -z "${OPENAI_API_KEY:-}" ]; then
+                echo "Pre-flight: OPENAI_API_KEY missing for KILO_PROVIDER=openai." >&2
+                failures=$((failures + 1))
+              fi
+              ;;
+            google)
+              if [ -z "${GOOGLE_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ]; then
+                echo "Pre-flight: GOOGLE_API_KEY/GEMINI_API_KEY missing for KILO_PROVIDER=google." >&2
+                failures=$((failures + 1))
+              fi
+              ;;
+            openrouter)
+              if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+                echo "Pre-flight: OPENROUTER_API_KEY missing for KILO_PROVIDER=openrouter." >&2
+                failures=$((failures + 1))
+              fi
+              ;;
+          esac
+        fi
+      fi
+      ;;
+    opencode)
+      if [ -n "${OPENCODE_PROVIDER:-}" ]; then
+        case "${OPENCODE_PROVIDER}" in
+          zai)
+            if [ -z "${ZAI_API_KEY:-}" ]; then
+              echo "Pre-flight: ZAI_API_KEY missing for OPENCODE_PROVIDER=zai." >&2
+              failures=$((failures + 1))
+            fi
+            ;;
+        esac
+      elif [ ! -f "/home/node/.local/share/opencode/auth.json" ]; then
+        echo "Pre-flight: OpenCode auth not configured. Set OPENCODE_PROVIDER + API key, or run: opencode auth login." >&2
         failures=$((failures + 1))
       fi
       ;;
@@ -362,6 +347,14 @@ for index in "${!agent_ids[@]}"; do
     seed_provider_home "/home/node/.gemini" "$agent_home/.gemini"
     seed_provider_home "/home/node/.claude" "$agent_home/.claude"
     seed_provider_home "/home/node/.config/claude" "$agent_home/.config/claude"
+    seed_provider_home "/home/node/.config/kilo" "$agent_home/.config/kilo"
+    seed_provider_home "/home/node/.config/opencode" "$agent_home/.config/opencode"
+    seed_provider_home "/home/node/.local/share/opencode" "$agent_home/.local/share/opencode"
+
+    # Generate OpenCode auth.json if missing (API key stored in auth.json,
+    # not in config provider options). Must run after seed_provider_home so
+    # the bind-mounted config is already in place.
+    generate_opencode_config "$agent_home"
 
     # Login shells (bash -lc) reset PATH from /etc/profile, losing the
     # Docker ENV that includes the npm global bin directory. Write a

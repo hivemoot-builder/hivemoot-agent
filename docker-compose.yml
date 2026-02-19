@@ -5,6 +5,8 @@ x-agent-base: &agent-base
     args:
       CODEX_VERSION: ${CODEX_VERSION:-latest}
       GEMINI_VERSION: ${GEMINI_VERSION:-latest}
+      KILO_VERSION: ${KILO_VERSION:-latest}
+      OPENCODE_VERSION: ${OPENCODE_VERSION:-latest}
       CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-latest}
       HIVEMOOT_CLI_VERSION: ${HIVEMOOT_CLI_VERSION:-latest}
   image: hivemoot-agent:local
@@ -18,11 +20,13 @@ x-agent-base: &agent-base
     - /tmp:size=2g,mode=1777
   volumes:
     - ./data:/workspace
-    - ./secrets:/run/secrets:ro
     - codex-home:/home/node/.codex
     - gemini-home:/home/node/.gemini
     - claude-home:/home/node/.claude
     - claude-config:/home/node/.config/claude
+    - kilo-config:/home/node/.config/kilo
+    - opencode-config:/home/node/.config/opencode
+    - opencode-data:/home/node/.local/share/opencode
   stdin_open: true
   tty: true
 
@@ -31,9 +35,14 @@ x-agent-env: &agent-env
   AGENT_PROVIDER: ${AGENT_PROVIDER:-claude}
   AGENT_AUTH_MODE: ${AGENT_AUTH_MODE:-api_key}
   AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-1800}
+  SESSION_RESUME: ${SESSION_RESUME:-}
+  SESSION_RESUME_ENABLED: ${SESSION_RESUME_ENABLED:-1}
+  SESSION_RESUME_MAX_IDLE_HOURS: ${SESSION_RESUME_MAX_IDLE_HOURS:-12}
+  SESSION_RESUME_MAX_AGE_HOURS: ${SESSION_RESUME_MAX_AGE_HOURS:-24}
   WATCH_MENTIONS: ${WATCH_MENTIONS:-}
   FRESH_CLONE: ${FRESH_CLONE:-1}
   AGENT_MODEL: ${AGENT_MODEL:-}
+  AGENT_PROMPT_FILE: ${AGENT_PROMPT_FILE:-}
   AGENT_EXTRA_PROMPT: ${AGENT_EXTRA_PROMPT:-}
   AGENT_ID_01: ${AGENT_ID_01:-}
   AGENT_ID_02: ${AGENT_ID_02:-}
@@ -70,6 +79,13 @@ x-agent-env: &agent-env
   GOOGLE_API_KEY_FILE: ${GOOGLE_API_KEY_FILE:-}
   GEMINI_API_KEY_FILE: ${GEMINI_API_KEY_FILE:-}
   ANTHROPIC_API_KEY_FILE: ${ANTHROPIC_API_KEY_FILE:-}
+  OPENROUTER_API_KEY_FILE: ${OPENROUTER_API_KEY_FILE:-}
+  KILO_PROVIDER: ${KILO_PROVIDER:-}
+  KILO_MODEL: ${KILO_MODEL:-}
+  KILOCODE_TOKEN_FILE: ${KILOCODE_TOKEN_FILE:-}
+  ZAI_API_KEY_FILE: ${ZAI_API_KEY_FILE:-}
+  OPENCODE_PROVIDER: ${OPENCODE_PROVIDER:-}
+  OPENCODE_MODEL: ${OPENCODE_MODEL:-}
   MAX_CONSECUTIVE_FAILURES: ${MAX_CONSECUTIVE_FAILURES:-5}
   HIVEMOOT_CLI_VERSION: ${HIVEMOOT_CLI_VERSION:-latest}
   HIVEMOOT_CLI_UPDATE: ${HIVEMOOT_CLI_UPDATE:-auto}
@@ -78,6 +94,7 @@ x-agent-env: &agent-env
   WATCH_POLL_INTERVAL: ${WATCH_POLL_INTERVAL:-300}
   PERIODIC_INTERVAL_SECS: ${PERIODIC_INTERVAL_SECS:-3600}
   PERIODIC_JITTER_SECS: ${PERIODIC_JITTER_SECS:-300}
+  JOB_ID: ${JOB_ID:-}
 
 services:
   hivemoot-agent:
@@ -100,8 +117,15 @@ services:
     <<: *agent-base
     entrypoint: ["claude"]
 
+  auth-kilo:
+    <<: *agent-base
+    entrypoint: ["kilo", "auth", "login"]
+
 volumes:
   codex-home:
   gemini-home:
   claude-home:
   claude-config:
+  kilo-config:
+  opencode-config:
+  opencode-data:

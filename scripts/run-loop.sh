@@ -7,29 +7,11 @@ log() {
   printf '[run-loop %s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
 
-trim() {
-  local value="$1"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  printf '%s' "$value"
-}
-
-seed_provider_home() {
-  local shared_path="$1"
-  local agent_path="$2"
-
-  if [ ! -e "$shared_path" ]; then
-    return 0
-  fi
-
-  if [ -d "$shared_path" ]; then
-    mkdir -p "$agent_path"
-    cp -R "$shared_path"/. "$agent_path"/
-  else
-    mkdir -p "$(dirname "$agent_path")"
-    cp "$shared_path" "$agent_path"
-  fi
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=scripts/lib.sh
+. "${SCRIPT_DIR}/lib.sh"
+# shellcheck source=scripts/opencode-helpers.sh
+. "${SCRIPT_DIR}/opencode-helpers.sh"
 
 # ── Configuration ──────────────────────────────────────────────────
 
@@ -40,18 +22,23 @@ target_repo="${TARGET_REPO:-}"
 max_agents=10
 token_tmp_root="/tmp/hivemoot-agent-token-files"
 lock_dir="/tmp/agent-locks"
+agent_run_busy_exit=3
 
 # Periodic scheduling (backward compat: fall back to BASE_SECS / JITTER_SECS)
 periodic_interval="${PERIODIC_INTERVAL_SECS:-${BASE_SECS:-3600}}"
 periodic_jitter="${PERIODIC_JITTER_SECS:-${JITTER_SECS:-300}}"
 max_failures="${MAX_CONSECUTIVE_FAILURES:-5}"
+agent_failure_backoff_base="${PERIODIC_AGENT_FAILURE_BACKOFF_BASE_SECS:-300}"
+agent_failure_backoff_max="${PERIODIC_AGENT_FAILURE_BACKOFF_MAX_SECS:-3600}"
+agent_failure_backoff_jitter_pct="${PERIODIC_AGENT_FAILURE_BACKOFF_JITTER_PCT:-15}"
 
 # Mention watching (opt-in)
 watch_mentions="${WATCH_MENTIONS:-}"
 watch_poll_interval="${WATCH_POLL_INTERVAL:-300}"
 
 # Validate numeric settings
-for var_name in periodic_interval periodic_jitter max_failures; do
+for var_name in periodic_interval periodic_jitter max_failures \
+  agent_failure_backoff_base agent_failure_backoff_max agent_failure_backoff_jitter_pct; do
   val="${!var_name}"
   case "$val" in
     ''|*[!0-9]*) echo "${var_name} must be a non-negative integer" >&2; exit 1 ;;
@@ -63,6 +50,17 @@ if [ "$periodic_interval" -le 0 ]; then
 fi
 if [ "$max_failures" -le 0 ]; then
   echo "MAX_CONSECUTIVE_FAILURES must be > 0" >&2; exit 1
+fi
+if [ "$agent_failure_backoff_max" -le 0 ]; then
+  echo "PERIODIC_AGENT_FAILURE_BACKOFF_MAX_SECS must be > 0" >&2; exit 1
+fi
+if [ "$agent_failure_backoff_base" -gt "$agent_failure_backoff_max" ]; then
+  echo "PERIODIC_AGENT_FAILURE_BACKOFF_BASE_SECS must be <= PERIODIC_AGENT_FAILURE_BACKOFF_MAX_SECS" >&2
+  exit 1
+fi
+if [ "$agent_failure_backoff_jitter_pct" -gt 100 ]; then
+  echo "PERIODIC_AGENT_FAILURE_BACKOFF_JITTER_PCT must be between 0 and 100" >&2
+  exit 1
 fi
 
 if [ "$watch_mentions" = "1" ]; then
@@ -78,30 +76,9 @@ if [ "$watch_mentions" = "1" ]; then
   fi
 fi
 
+validate_target_repo "$target_repo"
+
 # ── Agent Slot Parsing ─────────────────────────────────────────────
-
-load_slot_token() {
-  local suffix="$1"
-  local token_var="AGENT_GITHUB_TOKEN_${suffix}"
-  local token_file_var="${token_var}_FILE"
-  local token="${!token_var:-}"
-  local token_file="${!token_file_var:-}"
-
-  if [ -n "$token" ] && [ -n "$token_file" ]; then
-    echo "Set either ${token_var} or ${token_file_var}, not both." >&2
-    exit 1
-  fi
-
-  if [ -z "$token" ] && [ -n "$token_file" ]; then
-    if [ ! -f "$token_file" ]; then
-      echo "${token_file_var} does not exist: ${token_file}" >&2
-      exit 1
-    fi
-    token="$(tr -d '\r\n' < "$token_file")"
-  fi
-
-  printf '%s' "$token"
-}
 
 declare -A seen_agents=()
 declare -a agent_ids=()
@@ -229,6 +206,56 @@ preflight_check() {
         failures=$((failures + 1))
       fi
       ;;
+    kilo)
+      if [ -z "${KILOCODE_TOKEN:-}" ]; then
+        if [ -z "${KILO_PROVIDER:-}" ]; then
+          echo "Pre-flight: KILO_PROVIDER is required for kilo (unless KILOCODE_TOKEN is set for gateway mode)." >&2
+          failures=$((failures + 1))
+        else
+          case "${KILO_PROVIDER}" in
+            anthropic)
+              if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+                echo "Pre-flight: ANTHROPIC_API_KEY missing for KILO_PROVIDER=anthropic." >&2
+                failures=$((failures + 1))
+              fi
+              ;;
+            openai)
+              if [ -z "${OPENAI_API_KEY:-}" ]; then
+                echo "Pre-flight: OPENAI_API_KEY missing for KILO_PROVIDER=openai." >&2
+                failures=$((failures + 1))
+              fi
+              ;;
+            google)
+              if [ -z "${GOOGLE_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ]; then
+                echo "Pre-flight: GOOGLE_API_KEY/GEMINI_API_KEY missing for KILO_PROVIDER=google." >&2
+                failures=$((failures + 1))
+              fi
+              ;;
+            openrouter)
+              if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+                echo "Pre-flight: OPENROUTER_API_KEY missing for KILO_PROVIDER=openrouter." >&2
+                failures=$((failures + 1))
+              fi
+              ;;
+          esac
+        fi
+      fi
+      ;;
+    opencode)
+      if [ -n "${OPENCODE_PROVIDER:-}" ]; then
+        case "${OPENCODE_PROVIDER}" in
+          zai)
+            if [ -z "${ZAI_API_KEY:-}" ]; then
+              echo "Pre-flight: ZAI_API_KEY missing for OPENCODE_PROVIDER=zai." >&2
+              failures=$((failures + 1))
+            fi
+            ;;
+        esac
+      elif [ ! -f "/home/node/.local/share/opencode/auth.json" ]; then
+        echo "Pre-flight: OpenCode auth not configured. Set OPENCODE_PROVIDER + API key, or run: opencode auth login." >&2
+        failures=$((failures + 1))
+      fi
+      ;;
   esac
 
   # Validate agent tokens against GitHub API
@@ -270,24 +297,6 @@ preflight_check() {
   log "Pre-flight: all checks passed (agents=${agent_count} repo=${target_repo:-unset})"
 }
 
-prepare_hivemoot_cli() {
-  local update_mode="${HIVEMOOT_CLI_UPDATE:-auto}"
-  local spec="@hivemoot-dev/cli@${HIVEMOOT_CLI_VERSION:-latest}"
-
-  if [ "$update_mode" = "skip" ]; then
-    log "Pre-run: skipping hivemoot CLI update (HIVEMOOT_CLI_UPDATE=skip)"
-  else
-    log "Pre-run: updating hivemoot CLI (${spec})"
-    npm install -g "$spec"
-    hash -r
-  fi
-
-  if ! command -v hivemoot >/dev/null 2>&1; then
-    echo "hivemoot CLI is not available." >&2
-    exit 1
-  fi
-}
-
 preflight_check
 prepare_hivemoot_cli
 
@@ -313,6 +322,14 @@ for index in "${!agent_ids[@]}"; do
   seed_provider_home "/home/node/.gemini" "$agent_home/.gemini"
   seed_provider_home "/home/node/.claude" "$agent_home/.claude"
   seed_provider_home "/home/node/.config/claude" "$agent_home/.config/claude"
+  seed_provider_home "/home/node/.config/kilo" "$agent_home/.config/kilo"
+  seed_provider_home "/home/node/.config/opencode" "$agent_home/.config/opencode"
+  seed_provider_home "/home/node/.local/share/opencode" "$agent_home/.local/share/opencode"
+
+  # Generate OpenCode auth.json if missing (API key stored in auth.json,
+  # not in config provider options). Must run after seed_provider_home so
+  # the bind-mounted config is already in place.
+  generate_opencode_config "$agent_home"
 
   # Ensure agent subprocesses can find npm-installed binaries
   # shellcheck disable=SC2016
@@ -351,11 +368,11 @@ trap cleanup EXIT
 trap handle_shutdown TERM INT
 
 # Try to run an agent with per-agent flock.
-# Returns 0 if the agent was busy (lock not acquired) or ran successfully.
-# Returns non-zero only on actual run-once.sh failure, allowing callers
-# to distinguish between "nothing wrong" and "agent run crashed."
+# Returns 0 on successful run-once.sh completion.
+# Returns ${agent_run_busy_exit} when the agent was busy (lock not acquired).
+# Returns non-zero/non-3 on actual run-once.sh failure.
 #
-# Args: agent_id extra_prompt [ack_key state_file]
+# Args: agent_id extra_prompt [ack_key state_file session_key]
 # When ack_key + state_file are provided and the run succeeds (exit 0),
 # calls `hivemoot ack` to mark the mention as read. On failure the mention
 # stays unread so the next poll cycle retries it.
@@ -364,6 +381,7 @@ try_run_agent() {
   local extra_prompt="$2"
   local ack_key="${3:-}"
   local state_file="${4:-}"
+  local session_key="${5:-}"
   local lock_file="${lock_dir}/${agent_id}.lock"
   local token_file="${agent_token_files[$agent_id]}"
   local agent_workspace="${workspace_root}/agents/${agent_id}"
@@ -374,7 +392,7 @@ try_run_agent() {
   mkdir -p "$agent_workspace" "$agent_log_dir" "$agent_home"
 
   (
-    flock -n 200 || { log "${agent_id}: busy, skipping"; exit 0; }
+    flock -n 200 || { log "${agent_id}: busy, skipping"; exit "$agent_run_busy_exit"; }
 
     log "${agent_id}: lock acquired, starting run"
 
@@ -387,6 +405,7 @@ try_run_agent() {
     export AGENT_GIT_EMAIL="${agent_id}@${email_domain}"
     export HIVEMOOT_BUZZ_ROLE="$agent_id"
     export AGENT_EXTRA_PROMPT="$extra_prompt"
+    export AGENT_SESSION_KEY="$session_key"
 
     unset AGENT_GITHUB_TOKEN GITHUB_TOKEN GH_TOKEN
 
@@ -407,6 +426,42 @@ try_run_agent() {
     log "${agent_id}: lock released"
     exit "$agent_exit"
   ) 200>"$lock_file"
+}
+
+calculate_agent_backoff_delay() {
+  local failure_count="$1"
+  local delay="$agent_failure_backoff_base"
+
+  if [ "$failure_count" -le 0 ] || [ "$delay" -le 0 ]; then
+    echo 0
+    return
+  fi
+
+  for ((attempt = 1; attempt < failure_count; attempt++)); do
+    if [ "$delay" -ge "$agent_failure_backoff_max" ]; then
+      delay="$agent_failure_backoff_max"
+      break
+    fi
+    delay=$((delay * 2))
+  done
+
+  if [ "$delay" -gt "$agent_failure_backoff_max" ]; then
+    delay="$agent_failure_backoff_max"
+  fi
+
+  if [ "$agent_failure_backoff_jitter_pct" -gt 0 ] && [ "$delay" -gt 0 ]; then
+    local jitter=$((delay * agent_failure_backoff_jitter_pct / 100))
+    if [ "$jitter" -gt 0 ]; then
+      local span=$((jitter * 2 + 1))
+      local offset=$((RANDOM % span - jitter))
+      delay=$((delay + offset))
+      if [ "$delay" -lt 1 ]; then
+        delay=1
+      fi
+    fi
+  fi
+
+  echo "$delay"
 }
 
 # ── Mention Watchers (one per agent, only when WATCH_MENTIONS=1) ──
@@ -477,11 +532,18 @@ Then read the full thread, research the topic, and take appropriate action with 
           ack_key="${thread_id}:${timestamp}"
         fi
 
+        local mention_session_key=""
+        if [ -n "$thread_id" ]; then
+          mention_session_key="mention-thread:${thread_id}"
+        elif [ -n "$number" ]; then
+          mention_session_key="mention-number:${number}"
+        fi
+
         # Try to acquire agent lock and run; pass ack info for deferred mark-read.
         # Redirect stdin from /dev/null so the backgrounded child doesn't inherit
         # the pipe fd — inherited pipe fds can flip to O_NONBLOCK and cause the
         # parent while-read loop to fail with EAGAIN, killing the watcher.
-        try_run_agent "$agent_id" "$combined_prompt" "$ack_key" "$state_file" </dev/null &
+        try_run_agent "$agent_id" "$combined_prompt" "$ack_key" "$state_file" "$mention_session_key" </dev/null &
 
       done || true  # Don't let pipefail+errexit kill the restart loop
 
@@ -514,6 +576,8 @@ start_periodic_scheduler() {
 
   (
     consecutive_failures=0
+    declare -A agent_failure_counts=()
+    declare -A agent_next_retry_at=()
 
     # This subshell terminates via SIGTERM from handle_shutdown, not via
     # a shared variable (subshells get a frozen copy of parent state).
@@ -535,31 +599,103 @@ start_periodic_scheduler() {
       log "Periodic: starting cycle for ${agent_count} agents"
 
       declare -a cycle_pids=()
+      declare -A pid_to_agent=()
+      cycle_skipped=0
+      cycle_started=0
+      now_epoch="$(date +%s)"
+
       for index in "${!agent_ids[@]}"; do
         aid="${agent_ids[$index]}"
+        next_retry="${agent_next_retry_at[$aid]:-0}"
+
+        if [ "$next_retry" -gt "$now_epoch" ]; then
+          remaining=$((next_retry - now_epoch))
+          log "Periodic: ${aid} in cooldown (${remaining}s remaining), skipping"
+          cycle_skipped=$((cycle_skipped + 1))
+          continue
+        fi
 
         try_run_agent "$aid" "$global_extra_prompt" &
-        cycle_pids+=($!)
+        pid=$!
+        cycle_pids+=("$pid")
+        pid_to_agent["$pid"]="$aid"
+        cycle_started=$((cycle_started + 1))
       done
 
       # Wait for all agent runs and track results
+      cycle_failures=0
+      cycle_busy=0
       cycle_ok=0
       for pid in "${cycle_pids[@]}"; do
+        aid="${pid_to_agent[$pid]}"
         if wait "$pid" 2>/dev/null; then
+          run_status=0
+        else
+          run_status=$?
+        fi
+
+        if [ "$run_status" -eq 0 ]; then
+          previous_failures="${agent_failure_counts[$aid]:-0}"
+          if [ "$previous_failures" -gt 0 ]; then
+            log "Periodic: ${aid} recovered after ${previous_failures} failed cycle(s)"
+          fi
+          agent_failure_counts["$aid"]=0
+          agent_next_retry_at["$aid"]=0
           cycle_ok=1
+          continue
+        fi
+
+        if [ "$run_status" -eq "$agent_run_busy_exit" ]; then
+          cycle_busy=$((cycle_busy + 1))
+          log "Periodic: ${aid} busy; keeping existing failure/backoff state"
+          continue
+        fi
+
+        cycle_failures=$((cycle_failures + 1))
+        current_failures="${agent_failure_counts[$aid]:-0}"
+        current_failures=$((current_failures + 1))
+        agent_failure_counts["$aid"]="$current_failures"
+
+        backoff_delay="$(calculate_agent_backoff_delay "$current_failures")"
+        failure_epoch="$(date +%s)"
+        retry_at=$((failure_epoch + backoff_delay))
+        agent_next_retry_at["$aid"]="$retry_at"
+
+        if [ "$current_failures" -eq 1 ]; then
+          log "Periodic: ${aid} entered failure backoff mode"
+        fi
+
+        if [ "$backoff_delay" -gt 0 ]; then
+          log "Periodic: ${aid} failed (${current_failures}x); cooldown ${backoff_delay}s"
+        else
+          log "Periodic: ${aid} failed (${current_failures}x); retrying next cycle"
         fi
       done
 
+      if [ "$cycle_started" -eq 0 ] && [ "$cycle_skipped" -gt 0 ]; then
+        log "Periodic: no agents eligible this cycle (${cycle_skipped} in cooldown)"
+      fi
+
+      if [ "$cycle_busy" -gt 0 ]; then
+        log "Periodic: ${cycle_busy} agent(s) were lock-busy this cycle"
+      fi
+
       if [ "$cycle_ok" -eq 1 ]; then
         consecutive_failures=0
-        log "Periodic: cycle completed"
+        log "Periodic: cycle completed (started=${cycle_started} skipped=${cycle_skipped} busy=${cycle_busy} failed=${cycle_failures})"
       else
-        consecutive_failures=$((consecutive_failures + 1))
-        log "Periodic: cycle failed (consecutive_failures=${consecutive_failures})"
-        if [ "$consecutive_failures" -ge "$max_failures" ]; then
-          log "Periodic: reached max consecutive failures (${max_failures}); exiting"
-          kill -TERM $$ 2>/dev/null || true
-          exit 1
+        if [ "$cycle_started" -eq 0 ]; then
+          log "Periodic: cycle had no runnable agents; not counting as a failure streak"
+        elif [ "$cycle_failures" -eq 0 ]; then
+          log "Periodic: cycle had no completed runs (busy=${cycle_busy}); not counting as a failure streak"
+        else
+          consecutive_failures=$((consecutive_failures + 1))
+          log "Periodic: cycle failed (started=${cycle_started} skipped=${cycle_skipped} busy=${cycle_busy} consecutive_failures=${consecutive_failures})"
+          if [ "$consecutive_failures" -ge "$max_failures" ]; then
+            log "Periodic: reached max consecutive failures (${max_failures}); exiting"
+            kill -TERM $$ 2>/dev/null || true
+            exit 1
+          fi
         fi
       fi
     done
@@ -574,6 +710,7 @@ start_periodic_scheduler() {
 
 log "Loop mode starting: ${agent_count} agents, repo=${target_repo:-unset}"
 log "  Periodic interval: ${periodic_interval}s +/-${periodic_jitter}s"
+log "  Periodic failure backoff: base=${agent_failure_backoff_base}s max=${agent_failure_backoff_max}s jitter=${agent_failure_backoff_jitter_pct}%"
 if [ "$watch_mentions" = "1" ]; then
   log "  Mention watching: enabled (poll interval: ${watch_poll_interval}s)"
 else
