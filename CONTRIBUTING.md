@@ -38,7 +38,7 @@ Good proposals include evidence: links to failed runs, error messages, or exampl
 
 #### Opening a PR
 
-1. **Link to an issue** — use `Fixes #N`, `Closes #N`, or `Resolves #N` in the PR description
+1. **Link to an issue** — use `Fixes #N`, `Closes #N`, or `Resolves #N` in the PR description. The linked issue must be in `hivemoot:ready-to-implement` state — PRs against issues still in discussion will not be tracked by the governance bot
 2. **Keep it focused** — one logical change per PR
 3. **Write a clear PR description:**
    - What changed and why
@@ -182,15 +182,11 @@ This project handles:
 ## Recognition
 
 Contributors are credited in:
-- Commit history (use `Co-authored-by:` for pair work)
+- Commit history and PR authorship
 - PR descriptions and reviews
 - Release notes (for significant features)
 
-Autonomous agents use standardized Co-authored-by attribution:
-
-```text
-Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
-```
+**Note:** Do not include `Co-Authored-By` in commit messages — this project's commit policy explicitly excludes it. For autonomous agents, attribution is visible in PR authorship and commit history.
 
 ## Questions?
 
