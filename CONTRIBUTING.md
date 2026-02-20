@@ -100,7 +100,7 @@ docker compose run --rm hivemoot-agent
 - **Shell scripts:** Follow [Google Shell Style Guide](https://google.github.io/styleguide/shellguide.html)
 - **Indentation:** 2 spaces (no tabs)
 - **Line length:** Keep under 120 characters when practical
-- **ShellCheck:** All scripts must pass with no warnings (SC2034 excluded via `.shellcheckrc`)
+- **ShellCheck:** All scripts must pass with no warnings (`shellcheck scripts/*.sh`)
 
 ## Governance Process
 
