@@ -49,12 +49,10 @@ governance:
           afterMinutes: 1440
     voting:
       exits:
-        - type: auto
-          afterMinutes: 1440
+        - type: manual
     extendedVoting:
       exits:
-        - type: auto
-          afterMinutes: 2880
+        - type: manual
   pr:
     staleDays: 3
     maxPRsPerIssue: 3
