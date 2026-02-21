@@ -301,3 +301,95 @@ seed_provider_auth() {
   # OpenCode: auto-generate config and auth.json if missing
   generate_opencode_config "$agent_home"
 }
+
+# Shared bare-repo reference cache for accelerated git clones.
+# Multiple agents cloning the same repo share a single bare mirror on disk.
+# Subsequent clones borrow objects from the mirror then become self-contained
+# (via --dissociate) so the mirror can be updated or removed independently.
+#
+# Args:
+#   target_repo   owner/repo form of the repository
+#   mirror_dir    path for the bare mirror (e.g. /workspace/.git-cache/owner/repo/mirror.git)
+#   lock_dir      directory for flock lock files (e.g. /tmp/hivemoot-git-cache)
+#   clone_dir     destination for the working clone
+#   clone_depth   shallow depth (0 = full clone)
+#   askpass       path to a GIT_ASKPASS script that emits credentials
+#   git_pat       GitHub token forwarded as GIT_PAT to the askpass script
+#
+# Returns 0 on success; 1 if the caller should fall back to a direct clone.
+clone_with_reference_cache() {
+  local target_repo="$1"
+  local mirror_dir="$2"
+  local lock_dir="$3"
+  local clone_dir="$4"
+  local clone_depth="${5:-0}"
+  local askpass="$6"
+  local git_pat="$7"
+
+  local repo_url="https://github.com/${target_repo}.git"
+  # Lock file: replace / with - so it is a flat file under lock_dir.
+  local lock_name
+  lock_name="$(printf '%s' "$target_repo" | tr '/' '-')"
+  local lock_file="${lock_dir}/${lock_name}.lock"
+
+  mkdir -p "$lock_dir" "$(dirname "$mirror_dir")" || return 1
+
+  # Phase 1: under a writer lock, initialise or update the bare mirror.
+  # Subshell exit codes:
+  #   0  mirror is ready
+  #   1  mirror init or reclone failed
+  #   2  lock timed out (30s)
+  local mirror_rc=0
+  (
+    flock -w 30 9 || exit 2
+
+    if [ ! -d "$mirror_dir" ]; then
+      # First writer: clone the bare mirror.
+      if ! GIT_ASKPASS="$askpass" GIT_PAT="$git_pat" GIT_TERMINAL_PROMPT=0 \
+          git clone --bare --mirror "$repo_url" "$mirror_dir" 2>&1; then
+        rm -rf "$mirror_dir"
+        exit 1
+      fi
+      git -C "$mirror_dir" config gc.auto 0
+    else
+      # Sentinel: packed-refs is always written by a completed bare clone.
+      # Its absence means the previous init was interrupted.
+      if [ ! -f "${mirror_dir}/packed-refs" ]; then
+        echo "clone_with_reference_cache: incomplete mirror at ${mirror_dir}; recloning" >&2
+        rm -rf "$mirror_dir"
+        if ! GIT_ASKPASS="$askpass" GIT_PAT="$git_pat" GIT_TERMINAL_PROMPT=0 \
+            git clone --bare --mirror "$repo_url" "$mirror_dir" 2>&1; then
+          rm -rf "$mirror_dir"
+          exit 1
+        fi
+        git -C "$mirror_dir" config gc.auto 0
+      else
+        # Mirror looks complete; fetch updates. On transient failure, keep the
+        # existing mirror so the working clone can still borrow cached objects.
+        GIT_ASKPASS="$askpass" GIT_PAT="$git_pat" GIT_TERMINAL_PROMPT=0 \
+          git -C "$mirror_dir" fetch --prune origin 2>&1 || true
+      fi
+    fi
+  ) 9>"$lock_file"
+  mirror_rc=$?
+
+  if [ "$mirror_rc" -ne 0 ]; then
+    return 1
+  fi
+
+  # Phase 2: clone from mirror as a reference, then dissociate so the working
+  # clone is self-contained. No lock needed — the mirror is read-only here.
+  local clone_args=(--single-branch --reference "$mirror_dir" --dissociate)
+  if [ "$clone_depth" -gt 0 ]; then
+    clone_args+=(--depth "$clone_depth")
+  fi
+
+  if GIT_ASKPASS="$askpass" GIT_PAT="$git_pat" GIT_TERMINAL_PROMPT=0 \
+      git clone "${clone_args[@]}" "$repo_url" "$clone_dir" 2>&1; then
+    return 0
+  fi
+
+  # Working clone via mirror failed. Clean up and signal fallback to caller.
+  rm -rf "$clone_dir"
+  return 1
+}

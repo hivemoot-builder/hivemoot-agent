@@ -270,6 +270,7 @@ hivemoot_buzz_role="${HIVEMOOT_BUZZ_ROLE:-}"
 target_repo="${TARGET_REPO:-}"
 workspace_root="${WORKSPACE_ROOT:-/workspace}"
 clone_depth="${GIT_CLONE_DEPTH:-50}"
+shared_clone_cache="${SHARED_CLONE_CACHE:-1}"
 prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/default.md}"
 extra_prompt="${AGENT_EXTRA_PROMPT:-}"
 agent_model="${AGENT_MODEL:-}"
@@ -582,19 +583,37 @@ EOF
   fi
 
   if [ ! -d "$repo_dir/.git" ]; then
-    local clone_args=(--single-branch)
     local depth_label="full"
     if [ "$clone_depth" -gt 0 ]; then
-      clone_args+=(--depth "$clone_depth")
       depth_label="$clone_depth"
     fi
-    log "Cloning https://github.com/${target_repo}.git (depth=${depth_label})"
-    if ! GIT_ASKPASS="$askpass" GIT_PAT="$github_token" GIT_TERMINAL_PROMPT=0 \
-      git clone "${clone_args[@]}" "https://github.com/${target_repo}.git" "$repo_dir" 2>&1; then
-      rm -rf "$repo_dir"
-      rm -f "$askpass"
-      echo "Failed to clone ${target_repo}. Check token and repo access." >&2
-      exit 1
+    local fresh_clone_ok=0
+
+    if [ "${shared_clone_cache}" = "1" ]; then
+      local mirror_dir="${workspace_root}/.git-cache/${target_repo}/mirror.git"
+      log "Cloning https://github.com/${target_repo}.git via shared cache (depth=${depth_label})"
+      if clone_with_reference_cache \
+          "$target_repo" "$mirror_dir" "/tmp/hivemoot-git-cache" \
+          "$repo_dir" "$clone_depth" "$askpass" "$github_token"; then
+        fresh_clone_ok=1
+      else
+        log "Reference cache unavailable; falling back to direct clone"
+      fi
+    fi
+
+    if [ "$fresh_clone_ok" -eq 0 ]; then
+      local clone_args=(--single-branch)
+      if [ "$clone_depth" -gt 0 ]; then
+        clone_args+=(--depth "$clone_depth")
+      fi
+      log "Cloning https://github.com/${target_repo}.git (depth=${depth_label})"
+      if ! GIT_ASKPASS="$askpass" GIT_PAT="$github_token" GIT_TERMINAL_PROMPT=0 \
+        git clone "${clone_args[@]}" "https://github.com/${target_repo}.git" "$repo_dir" 2>&1; then
+        rm -rf "$repo_dir"
+        rm -f "$askpass"
+        echo "Failed to clone ${target_repo}. Check token and repo access." >&2
+        exit 1
+      fi
     fi
   fi
 
