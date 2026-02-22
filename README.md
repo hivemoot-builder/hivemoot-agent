@@ -568,6 +568,21 @@ OPENROUTER_API_KEY_FILE=/run/secrets/openrouter_api_key
 - Default `api_key` runs keep provider credential homes on `tmpfs` (RAM-backed).
 - In local subscription override mode, treat provider volumes and `./data/homes/<agent-id>` as sensitive credential state.
 
+### Provider Tool Restriction Posture
+
+The runtime limits what agents can do at the tool level differently across providers:
+
+| Provider | CLI-level tool restriction | Notes |
+|----------|--------------------------|-------|
+| **Claude** | `--disallowedTools` deny list active | Blocks env-dump commands and direct `/run/secrets/` reads; does not block shell indirection (e.g. `bash -c 'env'`) |
+| **Codex** | `workspace-write` sandbox + `shell_environment_policy.inherit=all` | OS-level filesystem write isolation; env vars are passed through (required for `gh` CLI) |
+| **Gemini** | None | `--yolo` is required for non-interactive shell access; no deny-tool or sandbox equivalent exists in the current CLI |
+| **Kilo / OpenCode** | None | Relies on container isolation |
+
+**For all providers**, the container boundary is the primary defense: read-only rootfs, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, and tmpfs-backed credential paths. Claude and Codex have an additional CLI-level layer; Gemini and Kilo/OpenCode do not.
+
+Operators deploying Gemini agents against untrusted repos should treat container hardening as the sole runtime control and consider additional network egress restrictions if credential exfiltration is a concern.
+
 ## Troubleshooting
 
 | Error | Fix |
