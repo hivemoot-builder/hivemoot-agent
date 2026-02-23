@@ -19,6 +19,7 @@ load_provider_secrets
 # ── Configuration ──────────────────────────────────────────────────
 
 workspace_root="${WORKSPACE_ROOT:-/workspace}"
+git_cache_dir="${GIT_CACHE_DIR:-${workspace_root}/.git-cache}"
 global_extra_prompt="${AGENT_EXTRA_PROMPT:-}"
 target_repo="${TARGET_REPO:-}"
 provider="${AGENT_PROVIDER:-claude}"
@@ -96,6 +97,15 @@ if [ "$watch_mentions" = "1" ]; then
 fi
 
 validate_workspace_root "$workspace_root"
+if [ "${SHARED_CLONE_CACHE:-1}" = "1" ]; then
+  case "$git_cache_dir" in
+    /*) ;;
+    *)
+      echo "GIT_CACHE_DIR must be an absolute path" >&2
+      exit 1
+      ;;
+  esac
+fi
 validate_target_repo "$target_repo"
 
 # ── Agent Slot Parsing ─────────────────────────────────────────────
@@ -296,6 +306,8 @@ try_run_agent() {
     log "${agent_id}: lock acquired, starting run"
 
     export HOME="$agent_home"
+    # Keep git mirrors in a shared path across all agents in this loop.
+    export GIT_CACHE_DIR="$git_cache_dir"
     export WORKSPACE_ROOT="$agent_workspace"
     export REPO_DIR="$agent_repo"
     export LOG_DIR="$agent_log_dir"

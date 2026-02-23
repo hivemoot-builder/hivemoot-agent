@@ -15,6 +15,7 @@ load_provider_secrets
 . "${SCRIPT_DIR}/opencode-helpers.sh"
 
 workspace_root="${WORKSPACE_ROOT:-/workspace}"
+git_cache_dir="${GIT_CACHE_DIR:-${workspace_root}/.git-cache}"
 global_extra_prompt="${AGENT_EXTRA_PROMPT:-}"
 target_repo="${TARGET_REPO:-}"
 launch_jitter_min="${LAUNCH_JITTER_MIN_SECS:-120}"
@@ -50,6 +51,15 @@ if [ "$launch_jitter_max" -lt "$launch_jitter_min" ]; then
 fi
 
 validate_workspace_root "$workspace_root"
+if [ "${SHARED_CLONE_CACHE:-1}" = "1" ]; then
+  case "$git_cache_dir" in
+    /*) ;;
+    *)
+      echo "GIT_CACHE_DIR must be an absolute path" >&2
+      exit 1
+      ;;
+  esac
+fi
 validate_target_repo "$target_repo"
 
 declare -a temp_token_files=()
@@ -255,6 +265,8 @@ for index in "${!agent_ids[@]}"; do
 
     unset AGENT_GITHUB_TOKEN GITHUB_TOKEN GH_TOKEN
     export HOME="$agent_home"
+    # Keep git mirrors in a shared path across all agents in this container.
+    export GIT_CACHE_DIR="$git_cache_dir"
     export WORKSPACE_ROOT="$agent_workspace"
     export REPO_DIR="$agent_repo"
     export LOG_DIR="$agent_log_dir"
