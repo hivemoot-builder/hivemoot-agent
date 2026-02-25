@@ -125,6 +125,7 @@ active_file="${state_dir}/active-container"
 active_lock_dir="${state_dir}/active-container.lock"
 run_log_file="${state_dir}/docker-run.log"
 overlap_file="${state_dir}/overlap.log"
+first_run_marker_file="${state_dir}/first-run-marker"
 
 container_exited_file() {
   local container_id="${1:-}"
@@ -216,6 +217,11 @@ case "$cmd" in
 
     snapshot_job_home "$@"
     printf '%s\n' "$*" >> "$run_log_file"
+
+    if [ -n "${MOCK_DOCKER_DELETE_FILE_ON_FIRST_RUN:-}" ] && [ ! -f "$first_run_marker_file" ]; then
+      rm -f "${MOCK_DOCKER_DELETE_FILE_ON_FIRST_RUN}" 2>/dev/null || true
+      : > "$first_run_marker_file"
+    fi
 
     if [ "${MOCK_DOCKER_RUN_FAIL:-0}" = "1" ]; then
       rmdir "$active_lock_dir" 2>/dev/null || true
@@ -821,6 +827,64 @@ run_spawn_failure_cleanup_case() {
   assert_no_gemini_auth_residue "${case_dir}/workspace/homes"
 
   echo "PASS: spawn failure cleanup removes copied provider auth files"
+}
+
+run_provider_secret_staging_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local provider_secret_source="${case_dir}/secrets/openai-api-key"
+  local run_log=""
+  local -a status_files=()
+  local status_file=""
+
+  mkdir -p "$case_dir"
+  mkdir -p "${case_dir}/secrets"
+  printf 'sk-test-openai\n' > "$provider_secret_source"
+  chmod 600 "$provider_secret_source"
+  setup_mock_docker "${case_dir}/mock-bin"
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_DOCKER_DELETE_FILE_ON_FIRST_RUN="${provider_secret_source}" \
+    TARGET_REPO="owner/repo" \
+    CONTROLLER_RUN_MODE="once" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_ID_02="builder" \
+    AGENT_GITHUB_TOKEN_02="token-2" \
+    OPENAI_API_KEY_FILE="${provider_secret_source}" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    PERIODIC_INTERVAL_SECS="60" \
+    PERIODIC_JITTER_SECS="0" \
+    bash "${repo_root}/scripts/controller.sh"
+
+  run_log="${case_dir}/mock-state/docker-run.log"
+  [ -f "$run_log" ] || fail "missing docker run log in provider secret staging case"
+  assert_file_contains "$run_log" "-e OPENAI_API_KEY_FILE=/home/node/.secrets/openai-api-key"
+
+  if [ -f "$provider_secret_source" ]; then
+    fail "expected source provider secret file to be deleted by mock docker"
+  fi
+
+  shopt -s nullglob
+  status_files=("${case_dir}/workspace"/workspaces/*/.hivemoot/status)
+  shopt -u nullglob
+  assert_eq "2" "${#status_files[@]}" "expected one completed status per agent in provider secret staging case"
+
+  for status_file in "${status_files[@]}"; do
+    assert_eq "completed" "$(cat "$status_file")" "expected completed job status"
+  done
+
+  if find "${case_dir}/workspace/controller-secrets" -type f -print -quit 2>/dev/null | grep -q .; then
+    fail "expected staged provider secrets to be removed during cleanup"
+  fi
+
+  echo "PASS: provider *_FILE secrets are staged once and survive source deletion"
 }
 
 run_mentions_case() {
@@ -2689,6 +2753,7 @@ run_invalid_skill_bind_mount_case \
 run_custom_prompt_companion_base_case "$repo_root" "${tmpdir}/custom-prompt-companion-base"
 run_failure_case "$repo_root" "${tmpdir}/failure"
 run_spawn_failure_cleanup_case "$repo_root" "${tmpdir}/spawn-failure"
+run_provider_secret_staging_case "$repo_root" "${tmpdir}/provider-secret-staging"
 run_mentions_case "$repo_root" "${tmpdir}/mentions"
 run_mentions_dedup_case "$repo_root" "${tmpdir}/mentions-dedup"
 run_orphan_recovery_case "$repo_root" "${tmpdir}/orphan-recovery"
