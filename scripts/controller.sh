@@ -201,10 +201,10 @@ append_secret_env() {
 }
 
 # Stage a secret for container access by copying _FILE-based secrets
-# into the job home. macOS aggressively cleans /var/folders temp
-# directories — the original _FILE paths live in SECRETS_TMPDIR which
-# can be purged while the controller is still running. Copying into
-# job home (already bind-mounted as /home/node) makes secrets durable.
+# into the job home. Source paths should already be staged into a
+# durable controller-owned directory by stage_provider_secret_sources().
+# Copying into job home (already bind-mounted as /home/node) makes
+# secrets durable for the lifetime of each worker job.
 #
 # For inline values (VAR set), passes through as -e VAR=value.
 # For file values (VAR_FILE set), copies to job home and sets VAR_FILE
@@ -241,12 +241,69 @@ stage_secret() {
   fi
 }
 
+stage_provider_secret_source() {
+  local var_name="$1"
+  local dest_name="$2"
+  local file_var_name="${var_name}_FILE"
+  local value="${!var_name:-}"
+  local file_value="${!file_var_name:-}"
+  local staged_path=""
+
+  if [ -n "$value" ] && [ -n "$file_value" ]; then
+    echo "Set either ${var_name} or ${file_var_name}, not both." >&2
+    return 1
+  fi
+
+  if [ -z "$file_value" ]; then
+    return 0
+  fi
+
+  case "$file_value" in
+    /*) ;;
+    *)
+      echo "${file_var_name} must be an absolute path: ${file_value}" >&2
+      return 1
+      ;;
+  esac
+
+  if [ ! -f "$file_value" ]; then
+    echo "${file_var_name} does not exist: ${file_value}" >&2
+    return 1
+  fi
+
+  mkdir -p "$controller_provider_secrets_root"
+  chmod 700 "$controller_provider_secrets_root" 2>/dev/null || true
+  staged_path="${controller_provider_secrets_root}/${dest_name}"
+  cp "$file_value" "$staged_path"
+  chmod 600 "$staged_path"
+  printf -v "$file_var_name" '%s' "$staged_path"
+  # shellcheck disable=SC2163  # dynamic export of the variable named in $file_var_name
+  export "$file_var_name"
+}
+
+stage_provider_secret_sources() {
+  stage_provider_secret_source OPENAI_API_KEY "openai-api-key" || return 1
+  stage_provider_secret_source GOOGLE_API_KEY "google-api-key" || return 1
+  stage_provider_secret_source GEMINI_API_KEY "gemini-api-key" || return 1
+  stage_provider_secret_source ANTHROPIC_API_KEY "anthropic-api-key" || return 1
+  stage_provider_secret_source OPENROUTER_API_KEY "openrouter-api-key" || return 1
+  stage_provider_secret_source CLAUDE_CODE_OAUTH_TOKEN "claude-oauth-token" || return 1
+  stage_provider_secret_source KILOCODE_TOKEN "kilocode-token" || return 1
+  stage_provider_secret_source ZAI_API_KEY "zai-api-key" || return 1
+}
+
 cleanup_job_home_credentials() {
   local job_home="$1"
 
   rm -f "${job_home}/.codex/auth.json" 2>/dev/null || true
   rmdir "${job_home}/.codex" 2>/dev/null || true
   rm -rf "${job_home}/.secrets" 2>/dev/null || true
+}
+
+cleanup_staged_provider_secrets() {
+  if [ -n "${controller_provider_secrets_root:-}" ] && [ -d "$controller_provider_secrets_root" ]; then
+    rm -rf "$controller_provider_secrets_root" 2>/dev/null || true
+  fi
 }
 
 # POST action=fail to the task execute endpoint from the controller.
@@ -1093,6 +1150,7 @@ cleanup() {
   stop_watchers
   stop_controller_workers
   cleanup_temp_tokens
+  cleanup_staged_provider_secrets
 }
 
 record_job_completion() {
@@ -1777,6 +1835,7 @@ task_execute_base_url="${AGENT_TASK_EXECUTE_BASE_URL:-}"
 task_executor_token=""
 max_agents=10
 controller_instance_id="$(date +%s)-$$"
+controller_provider_secrets_root="${workspace_root}/controller-secrets/${controller_instance_id}/providers"
 shutdown_requested=0
 completed_jobs=0
 failed_jobs=0
@@ -1906,6 +1965,9 @@ fi
 mkdir -p "$jobs_root" "$runs_root" "$workspaces_root" "$homes_root" "$queue_root" "$watch_state_root" "$lock_dir" "$token_tmp_root"
 chmod 700 "$workspace_root" "$jobs_root" "$runs_root" "$workspaces_root" "$homes_root" "$queue_root" "$watch_state_root" "$lock_dir" "$token_tmp_root" 2>/dev/null || true
 rm -f "$shutdown_flag_file"
+
+stage_provider_secret_sources
+
 declare -A seen_agents=()
 declare -a agent_ids=()
 declare -a agent_tokens=()
