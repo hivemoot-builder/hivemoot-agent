@@ -2437,8 +2437,6 @@ chmod 700 "$workspace_root" "$jobs_root" "$runs_root" "$workspaces_root" "$homes
 rm -f "$shutdown_flag_file"
 init_global_slots "$global_slots_dir" "$global_max_workers"
 
-stage_provider_secret_sources
-
 declare -A seen_agents=()
 declare -A agent_skill_lists=()
 declare -a agent_ids=()
@@ -2474,6 +2472,8 @@ done
 
 trap handle_shutdown TERM INT
 trap cleanup EXIT
+
+stage_provider_secret_sources
 
 agent_count="${#agent_ids[@]}"
 

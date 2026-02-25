@@ -887,6 +887,48 @@ run_provider_secret_staging_case() {
   echo "PASS: provider *_FILE secrets are staged once and survive source deletion"
 }
 
+run_provider_secret_startup_failure_cleanup_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local provider_secret_source="${case_dir}/secrets/openai-api-key"
+  local missing_google_secret="${case_dir}/secrets/missing-google-api-key"
+  local controller_log="${case_dir}/controller.log"
+
+  mkdir -p "$case_dir"
+  mkdir -p "${case_dir}/secrets"
+  printf 'sk-test-openai\n' > "$provider_secret_source"
+  chmod 600 "$provider_secret_source"
+  setup_mock_docker "${case_dir}/mock-bin"
+
+  if env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    TARGET_REPO="owner/repo" \
+    CONTROLLER_RUN_MODE="once" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    OPENAI_API_KEY_FILE="${provider_secret_source}" \
+    GOOGLE_API_KEY_FILE="${missing_google_secret}" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    PERIODIC_INTERVAL_SECS="60" \
+    PERIODIC_JITTER_SECS="0" \
+    bash "${repo_root}/scripts/controller.sh" >"${controller_log}" 2>&1; then
+    fail "controller succeeded unexpectedly in provider secret startup failure case"
+  fi
+
+  assert_file_contains "$controller_log" "GOOGLE_API_KEY_FILE does not exist"
+
+  if find "${case_dir}/workspace/controller-secrets" -type f -print -quit 2>/dev/null | grep -q .; then
+    fail "expected staged provider secrets to be removed after startup failure"
+  fi
+
+  echo "PASS: startup failure cleans staged provider secrets"
+}
+
 run_mentions_case() {
   local repo_root="$1"
   local case_dir="$2"
@@ -2754,6 +2796,7 @@ run_custom_prompt_companion_base_case "$repo_root" "${tmpdir}/custom-prompt-comp
 run_failure_case "$repo_root" "${tmpdir}/failure"
 run_spawn_failure_cleanup_case "$repo_root" "${tmpdir}/spawn-failure"
 run_provider_secret_staging_case "$repo_root" "${tmpdir}/provider-secret-staging"
+run_provider_secret_startup_failure_cleanup_case "$repo_root" "${tmpdir}/provider-secret-startup-failure"
 run_mentions_case "$repo_root" "${tmpdir}/mentions"
 run_mentions_dedup_case "$repo_root" "${tmpdir}/mentions-dedup"
 run_orphan_recovery_case "$repo_root" "${tmpdir}/orphan-recovery"
