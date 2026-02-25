@@ -319,6 +319,9 @@ if [ -n "${REPO_DIR:-}" ] || [ -n "${LOG_DIR:-}" ]; then
 fi
 
 job_id="${JOB_ID:-}"
+if [ -n "$job_id" ]; then
+  validate_job_id "$job_id"
+fi
 if [ -z "$job_id" ] && [ "$managed_mode" -eq 0 ]; then
   job_id="$(date '+%Y%m%d-%H%M%S')-$$"
 fi

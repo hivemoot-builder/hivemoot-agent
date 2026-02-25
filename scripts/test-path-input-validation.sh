@@ -77,3 +77,19 @@ assert_fails_with \
   env TARGET_REPO=owner/repo GIT_CLONE_DEPTH=1.5 bash scripts/run-once.sh
 
 echo "PASS: GIT_CLONE_DEPTH validation checks"
+
+echo "Running JOB_ID path-traversal validation checks"
+
+assert_fails_with \
+  "Invalid JOB_ID: ../../etc. Must contain only [A-Za-z0-9_-]." \
+  env TARGET_REPO=owner/repo JOB_ID=../../etc bash scripts/run-once.sh
+
+assert_fails_with \
+  "Invalid JOB_ID: ../escape. Must contain only [A-Za-z0-9_-]." \
+  env TARGET_REPO=owner/repo JOB_ID=../escape bash scripts/run-once.sh
+
+assert_fails_with \
+  "Invalid JOB_ID: job/id. Must contain only [A-Za-z0-9_-]." \
+  env TARGET_REPO=owner/repo JOB_ID=job/id bash scripts/run-once.sh
+
+echo "PASS: JOB_ID path-traversal validation checks"
