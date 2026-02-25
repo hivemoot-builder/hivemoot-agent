@@ -114,7 +114,8 @@ RUN su -s /bin/bash node -c \
   && ln -sf /usr/local/lib/claude/claude /usr/local/bin/claude
 WORKDIR /home/node
 USER node
-RUN mkdir -p /home/node/.claude /home/node/.config/claude
+RUN mkdir -p /home/node/.claude /home/node/.config/claude \
+  && ln -sf /tmp/.claude.json /home/node/.claude.json
 
 FROM base AS provider-all
 ARG CODEX_VERSION=latest
@@ -154,7 +155,8 @@ RUN mkdir -p \
   /home/node/.config/claude \
   /home/node/.config/kilo \
   /home/node/.config/opencode \
-  /home/node/.local/share/opencode
+  /home/node/.local/share/opencode \
+  && ln -sf /tmp/.claude.json /home/node/.claude.json
 
 # -----------------------------------------------------------------------------
 # Runtime stage — selects a provider stage via the global PROVIDER arg.
