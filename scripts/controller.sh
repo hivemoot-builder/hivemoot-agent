@@ -200,11 +200,53 @@ append_secret_env() {
   fi
 }
 
+# Stage a secret for container access by copying _FILE-based secrets
+# into the job home. macOS aggressively cleans /var/folders temp
+# directories — the original _FILE paths live in SECRETS_TMPDIR which
+# can be purged while the controller is still running. Copying into
+# job home (already bind-mounted as /home/node) makes secrets durable.
+#
+# For inline values (VAR set), passes through as -e VAR=value.
+# For file values (VAR_FILE set), copies to job home and sets VAR_FILE
+# to the container-side path.
+stage_secret() {
+  local var_name="$1"
+  local dest_name="$2"
+  local job_home="$3"
+  local file_var_name="${var_name}_FILE"
+  local value="${!var_name:-}"
+  local file_value="${!file_var_name:-}"
+
+  if [ -n "$value" ] && [ -n "$file_value" ]; then
+    echo "Set either ${var_name} or ${file_var_name}, not both." >&2
+    return 1
+  fi
+
+  if [ -n "$file_value" ]; then
+    if [ ! -f "$file_value" ]; then
+      echo "${file_var_name} does not exist: ${file_value}" >&2
+      return 1
+    fi
+    local secrets_dir="${job_home}/.secrets"
+    mkdir -p "$secrets_dir"
+    chmod 700 "$secrets_dir" 2>/dev/null || true
+    cp "$file_value" "${secrets_dir}/${dest_name}"
+    chmod 600 "${secrets_dir}/${dest_name}"
+    docker_run_args+=( -e "${file_var_name}=/home/node/.secrets/${dest_name}" )
+    return 0
+  fi
+
+  if [ -n "$value" ]; then
+    docker_run_args+=( -e "${var_name}=${value}" )
+  fi
+}
+
 cleanup_job_home_credentials() {
   local job_home="$1"
 
   rm -f "${job_home}/.codex/auth.json" 2>/dev/null || true
   rmdir "${job_home}/.codex" 2>/dev/null || true
+  rm -rf "${job_home}/.secrets" 2>/dev/null || true
 }
 
 # POST action=fail to the task execute endpoint from the controller.
@@ -344,14 +386,17 @@ spawn_worker() {
   append_env_if_set HEALTH_REPORT_MAX_RETRIES
 
   append_secret_env HIVEMOOT_AGENT_TOKEN
-  append_secret_env OPENAI_API_KEY
-  append_secret_env GOOGLE_API_KEY
-  append_secret_env GEMINI_API_KEY
-  append_secret_env ANTHROPIC_API_KEY
-  append_secret_env OPENROUTER_API_KEY
-  append_secret_env CLAUDE_CODE_OAUTH_TOKEN
-  append_secret_env KILOCODE_TOKEN
-  append_secret_env ZAI_API_KEY
+  # Stage provider secrets into job home rather than bind-mounting from tmpdir.
+  # macOS cleans /var/folders temp files while the controller is alive,
+  # which breaks bind-mount-based secret passing for long-lived services.
+  stage_secret OPENAI_API_KEY "openai-api-key" "$job_home"
+  stage_secret GOOGLE_API_KEY "google-api-key" "$job_home"
+  stage_secret GEMINI_API_KEY "gemini-api-key" "$job_home"
+  stage_secret ANTHROPIC_API_KEY "anthropic-api-key" "$job_home"
+  stage_secret OPENROUTER_API_KEY "openrouter-api-key" "$job_home"
+  stage_secret CLAUDE_CODE_OAUTH_TOKEN "claude-oauth-token" "$job_home"
+  stage_secret KILOCODE_TOKEN "kilocode-token" "$job_home"
+  stage_secret ZAI_API_KEY "zai-api-key" "$job_home"
 
   if [ -n "$prompt_file" ] && [ -f "$prompt_file" ]; then
     case "$prompt_file" in
