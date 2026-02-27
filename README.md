@@ -575,7 +575,7 @@ The runtime limits what agents can do at the tool level differently across provi
 | Provider | CLI-level tool restriction | Notes |
 |----------|--------------------------|-------|
 | **Claude** | `--disallowedTools` deny list active | Blocks env-dump commands and direct `/run/secrets/` reads; does not block shell indirection (e.g. `bash -c 'env'`) |
-| **Codex** | `workspace-write` sandbox + `shell_environment_policy.inherit=all` | OS-level filesystem write isolation; env vars are passed through (required for `gh` CLI) |
+| **Codex** | `--full-auto` sandbox + `shell_environment_policy.inherit=none` with minimal allowlist | OS-level filesystem write isolation; only `GH_TOKEN`, `PATH`, `HOME`, and a few shell vars passed through — provider key excluded from model-executed shells |
 | **Gemini** | None | `--yolo` is required for non-interactive shell access; no deny-tool or sandbox equivalent exists in the current CLI |
 | **Kilo / OpenCode** | None | Relies on container isolation |
 
