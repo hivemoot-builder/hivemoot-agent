@@ -574,14 +574,14 @@ The runtime limits what agents can do at the tool level differently across provi
 
 | Provider | CLI-level tool restriction | Notes |
 |----------|--------------------------|-------|
-| **Claude** | `--disallowedTools` deny list active | Blocks env-dump commands and direct `/run/secrets/` reads; does not block shell indirection (e.g. `bash -c 'env'`) |
-| **Codex** | `--full-auto` sandbox + `shell_environment_policy.inherit=none` with minimal allowlist | OS-level filesystem write isolation; only `GH_TOKEN`, `PATH`, `HOME`, and a few shell vars passed through — provider key excluded from model-executed shells |
+| **Claude** | None | Runs with `--dangerously-skip-permissions`; no tool deny list active on current main |
+| **Codex** | None | Runs with `--dangerously-bypass-approvals-and-sandbox`; no OS-level sandbox active on current main |
 | **Gemini** | None | `--yolo` is required for non-interactive shell access; no deny-tool or sandbox equivalent exists in the current CLI |
 | **Kilo / OpenCode** | None | Relies on container isolation |
 
-**For all providers**, the container boundary is the primary defense: read-only rootfs, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, and tmpfs-backed credential paths. Claude and Codex have an additional CLI-level layer; Gemini and Kilo/OpenCode do not.
+**For all providers**, the container boundary is the primary defense: read-only rootfs, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, and tmpfs-backed credential paths. No provider currently has an additional CLI-level tool restriction layer.
 
-Operators deploying Gemini agents against untrusted repos should treat container hardening as the sole runtime control and consider additional network egress restrictions if credential exfiltration is a concern.
+Operators deploying agents against untrusted repos should treat container hardening as the sole runtime control and consider additional network egress restrictions if credential exfiltration is a concern. CLI-level hardening (deny lists for Claude, sandboxing for Codex) is tracked in open PRs but not yet active.
 
 ## Troubleshooting
 
