@@ -254,22 +254,26 @@ rm -f "$preexisting_logs_file"
 
 extract_codex_result_markdown() {
   local log_path="$1"
+  local encoded_message=""
 
   if [ ! -f "$log_path" ]; then
     return 0
   fi
 
-  jq -Rrsc '
-    [
-      split("\n")[]
-      | fromjson?
+  encoded_message="$(
+    jq -Rr '
+      fromjson?
       | select(.type=="item.completed")
       | .item
       | select(.type=="agent_message")
       | .text // empty
-    ]
-    | last // empty
-  ' "$log_path"
+      | @base64
+    ' "$log_path" | tail -n 1
+  )"
+
+  if [ -n "$encoded_message" ]; then
+    printf '%s\n' "$encoded_message" | jq -Rr '@base64d'
+  fi
 }
 
 extract_task_result_markdown() {
