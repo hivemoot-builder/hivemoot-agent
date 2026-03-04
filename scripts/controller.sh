@@ -987,6 +987,23 @@ cleanup_temp_tokens() {
   done
 }
 
+# Send TERM to all tracked job subshells so they can exit promptly after their
+# worker containers have been stopped.  Called from handle_shutdown() after
+# stop_controller_workers; the KILL escalation in wait_for_all_jobs() is the
+# safety net if any subshell does not exit within the grace period.
+terminate_job_subshells() {
+  local pid=""
+
+  if [ "${#running_pids[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  log "Terminating ${#running_pids[@]} tracked job subshell(s)"
+  for pid in "${running_pids[@]}"; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+}
+
 stop_schedulers() {
   local pid=""
 
@@ -1013,6 +1030,7 @@ handle_shutdown() {
   stop_schedulers
   stop_watchers
   stop_controller_workers
+  terminate_job_subshells
 }
 
 cleanup() {
@@ -1113,9 +1131,28 @@ wait_for_available_slot() {
 }
 
 wait_for_all_jobs() {
+  # During a graceful shutdown, job subshells have already received TERM
+  # (via terminate_job_subshells).  If any subshell is still running after
+  # shutdown_grace_secs, escalate to KILL so the controller exits in bounded
+  # time even when docker-wait is stuck.  Outside of shutdown this path is
+  # unreachable (kill_deadline stays 0), so normal job drain is unaffected.
+  local kill_deadline=0
+  local pid=""
+
+  if [ "${shutdown_requested:-0}" -ne 0 ] && [ "${shutdown_grace_secs:-0}" -gt 0 ]; then
+    kill_deadline=$(( $(date +%s) + shutdown_grace_secs ))
+  fi
+
   while [ "${#running_pids[@]}" -gt 0 ]; do
     reap_finished_jobs
     if [ "${#running_pids[@]}" -gt 0 ]; then
+      if [ "$kill_deadline" -gt 0 ] && [ "$(date +%s)" -ge "$kill_deadline" ]; then
+        log "Job subshell(s) did not exit after ${shutdown_grace_secs}s grace period; sending KILL"
+        for pid in "${running_pids[@]}"; do
+          kill -KILL "$pid" 2>/dev/null || true
+        done
+        kill_deadline=0
+      fi
       sleep 1
     fi
   done
