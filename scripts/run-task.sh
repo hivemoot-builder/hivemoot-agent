@@ -292,6 +292,15 @@ export LOG_DIR="$log_dir"
 
 post_task_update progress "Task ${task_id} claimed. Starting execution." || true
 
+# In task mode, Codex can write the final answer atomically to a sidecar file
+# using --output-last-message, which is more reliable than JSONL log parsing.
+# Set CODEX_ANSWER_FILE so run-once.sh can pass the flag to the provider.
+if [ "${AGENT_PROVIDER:-unknown}" = "codex" ]; then
+  codex_answer_file="${workspace_root}/task-output/${task_id}/codex-answer.md"
+  mkdir -p "$(dirname "$codex_answer_file")"
+  export CODEX_ANSWER_FILE="$codex_answer_file"
+fi
+
 preexisting_logs_file="$(mktemp)"
 if [ -d "$log_dir" ]; then
   for candidate_log in "$log_dir"/*.log; do
@@ -325,8 +334,18 @@ rm -f "$preexisting_logs_file"
 
 extract_codex_result_markdown() {
   local log_path="$1"
+  local sidecar_path="${CODEX_ANSWER_FILE:-}"
   local encoded_message=""
 
+  # Prefer the --output-last-message sidecar: written atomically by codex at
+  # turn end, so it contains exactly the final assistant answer with no
+  # transport-layer JSON noise.
+  if [ -n "$sidecar_path" ] && [ -s "$sidecar_path" ]; then
+    cat "$sidecar_path"
+    return 0
+  fi
+
+  # Fall back to streaming JSONL extraction when sidecar is absent or empty.
   if [ ! -f "$log_path" ]; then
     return 0
   fi
@@ -347,6 +366,15 @@ extract_codex_result_markdown() {
   fi
 }
 
+# For Gemini and Claude in task mode, --output-format text makes the log the
+# raw answer. Read it directly without any JSON parsing.
+extract_text_result_from_log() {
+  local log_path="$1"
+  if [ -f "$log_path" ] && [ -s "$log_path" ]; then
+    cat "$log_path"
+  fi
+}
+
 extract_task_result_markdown() {
   local provider_name="$1"
   local log_path="$2"
@@ -354,6 +382,9 @@ extract_task_result_markdown() {
   case "$provider_name" in
     codex)
       extract_codex_result_markdown "$log_path"
+      ;;
+    gemini|claude)
+      extract_text_result_from_log "$log_path"
       ;;
     *)
       return 0
@@ -373,6 +404,8 @@ if [ "$run_exit_code" -eq 0 ]; then
     complete_payload="$task_result_markdown"
   elif [ "$provider_name" = "codex" ]; then
     complete_payload="Task completed, but no agent markdown result could be extracted from Codex JSON logs. See local debug details in task-output/${task_id}/result.md."
+  elif [ "$provider_name" = "gemini" ] || [ "$provider_name" = "claude" ]; then
+    complete_payload="Task completed, but no output was captured from ${provider_name}. See local debug details in task-output/${task_id}/result.md."
   fi
 fi
 
@@ -393,6 +426,9 @@ mkdir -p "$(dirname "$result_path")"
   if [ "$run_exit_code" -eq 0 ] && [ -z "$task_result_markdown" ] && [ "$provider_name" = "codex" ]; then
     echo
     echo "Execution finished, but the markdown result could not be extracted from Codex logs."
+  elif [ "$run_exit_code" -eq 0 ] && [ -z "$task_result_markdown" ] && { [ "$provider_name" = "gemini" ] || [ "$provider_name" = "claude" ]; }; then
+    echo
+    echo "Execution finished, but no output was captured from ${provider_name}."
   elif [ "$run_exit_code" -eq 0 ]; then
     echo
     echo "Execution finished successfully."
