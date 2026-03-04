@@ -942,6 +942,7 @@ report_task_worker_failure() {
 
   resp_file="$(mktemp)"
   status="$(curl -sS -o "$resp_file" -w '%{http_code}' \
+    --max-time 10 \
     -X POST \
     -H "Authorization: Bearer ${task_executor_token}" \
     -H 'Content-Type: application/json' \
