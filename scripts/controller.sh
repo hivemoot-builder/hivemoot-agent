@@ -920,6 +920,42 @@ cleanup() {
   cleanup_temp_tokens
 }
 
+# POST action=fail to the task execute endpoint when a task worker exits non-zero.
+# Best-effort: failures are logged but do not affect the caller's exit code.
+report_task_worker_failure() {
+  local task_id="$1"
+  local exit_code="$2"
+  local execute_url=""
+  local payload=""
+  local status=""
+  local resp_file=""
+
+  if [ -z "$task_execute_base_url" ] || [ -z "$task_id" ]; then
+    return 0
+  fi
+
+  execute_url="${task_execute_base_url%/}/${task_id}/execute"
+  payload="$(jq -cn \
+    --arg action "fail" \
+    --arg error "Worker exited with code ${exit_code}" \
+    '{action: $action, error: $error}')"
+
+  resp_file="$(mktemp)"
+  status="$(curl -sS -o "$resp_file" -w '%{http_code}' \
+    -X POST \
+    -H "Authorization: Bearer ${task_executor_token}" \
+    -H 'Content-Type: application/json' \
+    -d "$payload" \
+    "$execute_url")" || true
+
+  if [ "$status" != "200" ]; then
+    log "Task failure report rejected: task_id=${task_id} status=${status}"
+  else
+    log "Task failure reported: task_id=${task_id} exit=${exit_code}"
+  fi
+  rm -f "$resp_file"
+}
+
 record_job_completion() {
   local pid="$1"
   local exit_code="$2"
@@ -930,6 +966,7 @@ record_job_completion() {
   local ack_key="${pid_to_ack_key[$pid]:-}"
   local state_file="${pid_to_state_file[$pid]:-}"
   local processing_file="${pid_to_processing_file[$pid]:-}"
+  local task_id="${pid_to_task_id[$pid]:-}"
   local final_file=""
   local final_state="failed"
   local ack_successful=0
@@ -941,7 +978,8 @@ record_job_completion() {
     "pid_to_trigger_type[$pid]" \
     "pid_to_ack_key[$pid]" \
     "pid_to_state_file[$pid]" \
-    "pid_to_processing_file[$pid]"
+    "pid_to_processing_file[$pid]" \
+    "pid_to_task_id[$pid]"
 
   if [ "$exit_code" -eq 0 ]; then
     if [ "$trigger_type" = "mention" ] && [ -n "$ack_key" ] && [ -n "$state_file" ]; then
@@ -963,6 +1001,9 @@ record_job_completion() {
   else
     failed_jobs=$((failed_jobs + 1))
     log "Job failed: id=${job_id} repo=${repo} agent=${agent_id} exit=${exit_code}"
+    if [ "$trigger_type" = "task" ] && [ -n "$task_id" ]; then
+      report_task_worker_failure "$task_id" "$exit_code" || true
+    fi
   fi
 
   if [ -n "$processing_file" ] && [ -f "$processing_file" ]; then
@@ -1189,6 +1230,7 @@ launch_job() {
   pid_to_ack_key["$pid"]="$ack_key"
   pid_to_state_file["$pid"]="$state_file"
   pid_to_processing_file["$pid"]="$processing_file"
+  pid_to_task_id["$pid"]="$task_id"
 
   log "Queued job: id=${job_id} repo=${repo} agent=${agent_id} trigger=${trigger_type}"
 }
@@ -1588,6 +1630,7 @@ declare -A pid_to_trigger_type=()
 declare -A pid_to_ack_key=()
 declare -A pid_to_state_file=()
 declare -A pid_to_processing_file=()
+declare -A pid_to_task_id=()
 declare -A agent_token_files=()
 declare -A repo_lock_files=()
 

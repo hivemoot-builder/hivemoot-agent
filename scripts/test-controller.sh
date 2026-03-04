@@ -255,6 +255,7 @@ mkdir -p "$state_dir"
 output_file=""
 write_format=""
 auth_header=""
+request_body=""
 url=""
 
 while [ "$#" -gt 0 ]; do
@@ -273,7 +274,11 @@ while [ "$#" -gt 0 ]; do
       fi
       shift 2
       ;;
-    -X|-d)
+    -X)
+      shift 2
+      ;;
+    -d)
+      request_body="${2:-}"
       shift 2
       ;;
     -s|-S|-sS)
@@ -286,7 +291,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-printf 'URL=%s AUTH=%s\n' "$url" "$auth_header" >> "${state_dir}/curl.log"
+printf 'URL=%s AUTH=%s BODY=%s\n' "$url" "$auth_header" "$request_body" >> "${state_dir}/curl.log"
 
 status="200"
 body='{"task":{"task_id":"task-claim-1","prompt":"Inspect queue behavior","repos":["owner/claimed"]}}'
@@ -1011,6 +1016,48 @@ run_task_watch_scope_validation_case() {
   echo "PASS: task-watch mode requires explicit dispatch scope"
 }
 
+run_task_watch_worker_failure_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local curl_log=""
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+  setup_mock_curl "${case_dir}/mock-bin"
+
+  # Worker exits non-zero; controller should POST action=fail to the execute endpoint.
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_DOCKER_WAIT_SLEEP_SECS="0" \
+    MOCK_DOCKER_WAIT_EXIT="1" \
+    MOCK_CURL_STATE_DIR="${case_dir}/curl-state" \
+    CONTROLLER_RUN_MODE="once" \
+    WATCH_TASKS="1" \
+    TASK_DISPATCH_AGENT_IDS="worker" \
+    AGENT_TASK_CLAIM_URL="https://api.example.com/api/tasks/claim" \
+    HIVEMOOT_AGENT_TOKEN="shared-token" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    PERIODIC_INTERVAL_SECS="60" \
+    PERIODIC_JITTER_SECS="0" \
+    bash "${repo_root}/scripts/controller.sh" >"${case_dir}/controller.log" 2>&1 || true
+
+  curl_log="${case_dir}/curl-state/curl.log"
+  [ -f "$curl_log" ] || fail "missing curl log in task-watch worker-failure case"
+
+  # Execute endpoint must be called with action=fail payload.
+  assert_file_contains "$curl_log" "URL=https://api.example.com/api/tasks/task-claim-1/execute"
+  assert_file_contains "$curl_log" "BODY={\"action\":\"fail\""
+
+  echo "PASS: task-watch worker failure reports action=fail to execute endpoint"
+}
+
 run_shutdown_signal_case() {
   local repo_root="$1"
   local case_dir="$2"
@@ -1254,6 +1301,7 @@ run_task_watch_token_file_case "$repo_root" "${tmpdir}/task-watch-token-file"
 run_task_watch_no_task_case "$repo_root" "${tmpdir}/task-watch-empty"
 run_task_watch_invalid_repo_case "$repo_root" "${tmpdir}/task-watch-invalid-repo"
 run_task_watch_scope_validation_case "$repo_root" "${tmpdir}/task-watch-scope-validation"
+run_task_watch_worker_failure_case "$repo_root" "${tmpdir}/task-watch-worker-failure"
 run_shutdown_signal_case "$repo_root" "${tmpdir}/shutdown"
 run_same_agent_concurrent_case "$repo_root" "${tmpdir}/same-agent-concurrent"
 run_periodic_deferral_cleanup_case "$repo_root" "${tmpdir}/periodic-deferral-cleanup"
