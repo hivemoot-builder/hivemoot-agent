@@ -368,6 +368,11 @@ extract_codex_result_markdown() {
 
 # For Gemini and Claude in task mode, --output-format text makes the log the
 # raw answer. Read it directly without any JSON parsing.
+# Assumption: run-once.sh captures provider output via `2>&1 | tee -a "$log_file"`,
+# so log_path contains both stdout and stderr. For text mode without --verbose,
+# stderr is expected empty in practice for both CLIs, making the whole log safe
+# to use as the result. If a future CLI change produces non-empty stderr in text
+# mode, the prefix lines would appear in the posted result — revisit then.
 extract_text_result_from_log() {
   local log_path="$1"
   if [ -f "$log_path" ] && [ -s "$log_path" ]; then
