@@ -220,9 +220,11 @@ spawn_worker() {
   local task_id="${10:-}"
   local task_prompt="${11:-}"
   local task_claim_token="${12:-}"
+  local task_messages_file="${13:-}"
 
   local container_name="${worker_name_prefix}-${job_id}"
   local prompt_file="${AGENT_PROMPT_FILE:-}"
+  local companion_base_prompt=""
   local worker_run_mode="once"
 
   if [ "$trigger_type" = "task" ]; then
@@ -283,6 +285,9 @@ spawn_worker() {
   if [ "$worker_run_mode" = "task" ]; then
     docker_run_args+=( -e "AGENT_TASK_ID=${task_id}" )
     docker_run_args+=( -e "AGENT_TASK_PROMPT=${task_prompt}" )
+    if [ -n "$task_messages_file" ]; then
+      docker_run_args+=( -e "AGENT_TASK_MESSAGES_FILE=${task_messages_file}" )
+    fi
     if [ -n "$task_claim_token" ]; then
       docker_run_args+=( -e "AGENT_TASK_CLAIM_TOKEN=${task_claim_token}" )
     fi
@@ -328,6 +333,9 @@ spawn_worker() {
         return 1
         ;;
     esac
+    if companion_base_prompt="$(resolve_companion_base_prompt "$prompt_file")"; then
+      docker_run_args+=( -v "${companion_base_prompt}:${companion_base_prompt}:ro" )
+    fi
     docker_run_args+=( -v "${prompt_file}:${prompt_file}:ro" )
   fi
 
@@ -734,6 +742,95 @@ prune_queue_artifacts() {
   done
 }
 
+prune_stale_workspaces() {
+  local now=0
+  local mtime=0
+  local age_secs=0
+  local job_dir=""
+  local job_id=""
+  local status_file=""
+  local status=""
+  local pruned=0
+  local failed=0
+  local prune_failed=0
+  local target=""
+  local -a workspace_dirs=()
+  local -a stale_job_ids=()
+  local -a prune_targets=()
+
+  if [ "$workspace_ttl_secs" -le 0 ]; then
+    return 0
+  fi
+
+  now="$(date +%s)"
+  shopt -s nullglob
+  workspace_dirs=("${workspaces_root}"/*/)
+  shopt -u nullglob
+
+  # Collect stale candidates first so deletion order cannot affect iteration.
+  for job_dir in "${workspace_dirs[@]}"; do
+    [ -d "$job_dir" ] || continue
+    job_id="$(basename "$job_dir")"
+
+    # Only prune jobs in a terminal state.
+    status_file="${job_dir}/.hivemoot/status"
+    if [ ! -f "$status_file" ]; then
+      continue
+    fi
+    status="$(cat "$status_file" 2>/dev/null || true)"
+    case "$status" in
+      completed|failed|cancelled) ;;
+      *) continue ;;
+    esac
+
+    mtime="$(file_mtime_epoch "$status_file" "$now")"
+    age_secs=$((now - mtime))
+    if [ "$age_secs" -le "$workspace_ttl_secs" ]; then
+      continue
+    fi
+
+    stale_job_ids+=("$job_id")
+  done
+
+  for job_id in "${stale_job_ids[@]}"; do
+    prune_targets=(
+      "${homes_root:?}/${job_id}"
+      "${runs_root:?}/${job_id}"
+      "${jobs_root:?}/${job_id}"
+      "${workspaces_root:?}/${job_id}"
+    )
+    prune_failed=0
+
+    for target in "${prune_targets[@]}"; do
+      if ! rm -rf -- "$target"; then
+        log "WARN: failed to remove stale workspace path: job_id=${job_id} path=${target}"
+        prune_failed=1
+      fi
+    done
+
+    for target in "${prune_targets[@]}"; do
+      if [ -e "$target" ]; then
+        log "WARN: stale workspace prune incomplete: job_id=${job_id} path=${target}"
+        prune_failed=1
+      fi
+    done
+
+    if [ "$prune_failed" -eq 0 ]; then
+      pruned=$((pruned + 1))
+    else
+      failed=$((failed + 1))
+    fi
+  done
+
+  if [ "$pruned" -gt 0 ]; then
+    log "Pruned ${pruned} stale workspace(s) (ttl=${workspace_ttl_secs}s)"
+  fi
+
+  if [ "$failed" -gt 0 ]; then
+    log "WARN: failed to fully prune ${failed} stale workspace(s) (ttl=${workspace_ttl_secs}s)"
+  fi
+}
+
 run_queue_maintenance() {
   local force_run="${1:-0}"
   local now=0
@@ -747,6 +844,7 @@ run_queue_maintenance() {
 
   recover_orphaned_triggers
   prune_queue_artifacts
+  prune_stale_workspaces
   last_queue_maintenance_epoch="$(date +%s)"
 }
 
@@ -1033,6 +1131,7 @@ run_job() {
   local task_id="${7:-}"
   local task_prompt="${8:-}"
   local task_claim_token="${9:-}"
+  local task_messages_json="${10:-}"
 
   local token_file="${agent_token_files[$agent_id]}"
   local lock_key="${repo}:${agent_id}"
@@ -1049,6 +1148,8 @@ run_job() {
   local exit_code=125
   local log_pid=0
   local log_follow_deadline=0
+  local task_messages_file=""
+  local task_messages_host_path=""
 
   if [ -z "$repo_lock_file" ]; then
     ensure_agent_lock_file "$repo" "$agent_id"
@@ -1077,7 +1178,18 @@ run_job() {
 
   write_job_status "$job_workspace" "$job_id" "$repo" "$agent_id" "$trigger_type" "running" "-"
 
-  if ! container_id="$(spawn_worker "$job_id" "$repo" "$agent_id" "$job_workspace" "$job_home" "$token_file" "$extra_prompt" "$session_key" "$trigger_type" "$task_id" "$task_prompt" "$task_claim_token")"; then
+  if [ "$trigger_type" = "task" ] && [ -n "$task_messages_json" ] && [ -n "$task_id" ]; then
+    task_messages_host_path="${job_workspace}/task-input/${task_id}/messages.json"
+    mkdir -p "$(dirname "$task_messages_host_path")"
+    printf '%s' "$task_messages_json" > "$task_messages_host_path"
+    chmod 600 "$task_messages_host_path" 2>/dev/null || true
+    if [[ "$(uname -s)" == "Linux" ]]; then
+      chown 1000:1000 "$task_messages_host_path" 2>/dev/null || true
+    fi
+    task_messages_file="/workspace/task-input/${task_id}/messages.json"
+  fi
+
+  if ! container_id="$(spawn_worker "$job_id" "$repo" "$agent_id" "$job_workspace" "$job_home" "$token_file" "$extra_prompt" "$session_key" "$trigger_type" "$task_id" "$task_prompt" "$task_claim_token" "$task_messages_file")"; then
     cleanup_job_home_credentials "$job_home"
     write_job_status "$job_workspace" "$job_id" "$repo" "$agent_id" "$trigger_type" "failed" "125"
     return 125
@@ -1146,6 +1258,7 @@ launch_job() {
   local task_id="${10:-}"
   local task_prompt="${11:-}"
   local task_claim_token="${12:-}"
+  local task_messages_json="${13:-}"
 
   ensure_agent_lock_file "$repo" "$agent_id"
 
@@ -1183,7 +1296,7 @@ launch_job() {
   fi
 
   (
-    run_job "$job_id" "$repo" "$agent_id" "$trigger_type" "$extra_prompt" "$session_key" "$task_id" "$task_prompt" "$task_claim_token"
+    run_job "$job_id" "$repo" "$agent_id" "$trigger_type" "$extra_prompt" "$session_key" "$task_id" "$task_prompt" "$task_claim_token" "$task_messages_json"
   ) &
 
   local pid=$!
@@ -1280,6 +1393,7 @@ claim_next_task() {
   claimed_task_prompt=""
   claimed_task_repo=""
   claimed_task_claim_token=""
+  claimed_task_messages_json=""
 
   response_file="$(mktemp)"
   status="$(curl -sS -o "$response_file" -w '%{http_code}' \
@@ -1303,6 +1417,11 @@ claim_next_task() {
   claimed_task_id="$(jq -r '.task.task_id // empty' < "$response_file")"
   claimed_task_prompt="$(jq -r '.task.prompt // empty' < "$response_file")"
   claimed_task_claim_token="$(jq -r '.claim_token // empty' < "$response_file")"
+  if ! claimed_task_messages_json="$(jq -c '(.messages // []) | if type=="array" then . else [] end' < "$response_file")"; then
+    log "Claimed task response contains invalid messages payload"
+    rm -f "$response_file"
+    return 2
+  fi
   repos_count="$(jq -r '(.task.repos | length) // 0' < "$response_file")"
   if [ "$repos_count" -ne 1 ]; then
     log "Claimed task must contain exactly one repo, got ${repos_count}"
@@ -1336,7 +1455,7 @@ queue_claimed_task_job() {
   agent_id="$(pick_next_task_agent)"
   job_id="$(generate_job_id)"
 
-  if launch_job "$job_id" "$claimed_task_repo" "$agent_id" "task" "$global_extra_prompt" "" "" "" "" "$claimed_task_id" "$claimed_task_prompt" "$claimed_task_claim_token"; then
+  if launch_job "$job_id" "$claimed_task_repo" "$agent_id" "task" "$global_extra_prompt" "" "" "" "" "$claimed_task_id" "$claimed_task_prompt" "$claimed_task_claim_token" "$claimed_task_messages_json"; then
     log "Queued claimed task: task_id=${claimed_task_id} repo=${claimed_task_repo} agent=${agent_id} job=${job_id}"
     return 0
   fi
@@ -1554,6 +1673,7 @@ task_poll_interval_secs="${TASK_POLL_INTERVAL_SECS:-120}"
 task_dispatch_agent_ids="${TASK_DISPATCH_AGENT_IDS:-}"
 orphan_recovery_grace_secs="${ORPHAN_RECOVERY_GRACE_SECS:-0}"
 queue_artifact_ttl_secs="${QUEUE_ARTIFACT_TTL_SECS:-604800}"
+workspace_ttl_secs="${WORKSPACE_TTL_SECS:-86400}"
 queue_maintenance_interval_secs="${QUEUE_MAINTENANCE_INTERVAL_SECS:-60}"
 shutdown_grace_secs="${CONTROLLER_SHUTDOWN_GRACE_SECS:-30}"
 workspace_root="${CONTROLLER_WORKSPACE_ROOT:-${WORKSPACE_ROOT:-$(pwd)/data/controller}}"
@@ -1584,6 +1704,7 @@ claimed_task_id=""
 claimed_task_prompt=""
 claimed_task_repo=""
 claimed_task_claim_token=""
+claimed_task_messages_json=""
 
 declare -a temp_token_files=()
 declare -a running_pids=()
@@ -1635,6 +1756,7 @@ require_positive_integer PERIODIC_INTERVAL_SECS "$periodic_interval"
 require_non_negative_integer PERIODIC_JITTER_SECS "$periodic_jitter"
 require_non_negative_integer ORPHAN_RECOVERY_GRACE_SECS "$orphan_recovery_grace_secs"
 require_non_negative_integer QUEUE_ARTIFACT_TTL_SECS "$queue_artifact_ttl_secs"
+require_non_negative_integer WORKSPACE_TTL_SECS "$workspace_ttl_secs"
 require_non_negative_integer QUEUE_MAINTENANCE_INTERVAL_SECS "$queue_maintenance_interval_secs"
 if [ "$watch_mentions" = "1" ]; then
   require_positive_integer WATCH_POLL_INTERVAL "$watch_poll_interval"

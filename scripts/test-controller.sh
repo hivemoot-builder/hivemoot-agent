@@ -40,6 +40,22 @@ assert_eq() {
   fi
 }
 
+assert_exists() {
+  local path="$1"
+
+  if [ ! -e "$path" ]; then
+    fail "expected path to exist: ${path}"
+  fi
+}
+
+assert_not_exists() {
+  local path="$1"
+
+  if [ -e "$path" ]; then
+    fail "expected path to be removed: ${path}"
+  fi
+}
+
 assert_no_codex_auth_residue() {
   local homes_root="$1"
   local -a auth_files=()
@@ -289,7 +305,7 @@ done
 printf 'URL=%s AUTH=%s\n' "$url" "$auth_header" >> "${state_dir}/curl.log"
 
 status="200"
-body='{"task":{"task_id":"task-claim-1","prompt":"Inspect queue behavior","repos":["owner/claimed"]},"claim_token":"claim-token-1"}'
+  body='{"task":{"task_id":"task-claim-1","prompt":"Inspect queue behavior","repos":["owner/claimed"]},"claim_token":"claim-token-1","messages":[{"role":"user","content":"Initial context","created_at":"2026-03-05T03:00:00.000Z"},{"role":"system","content":"Task reopened","created_at":"2026-03-05T03:05:00.000Z"}]}'
 
 case "${MOCK_TASK_CLAIM_MODE:-task}" in
   empty)
@@ -317,6 +333,45 @@ fi
 EOF_MOCK
 
   chmod +x "${mock_bin}/curl"
+}
+
+setup_mock_rm_failer() {
+  local mock_bin="$1"
+  mkdir -p "$mock_bin"
+
+  cat > "${mock_bin}/rm" <<'EOF_MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+
+target=""
+if [ "$#" -gt 0 ]; then
+  target="${@: -1}"
+fi
+
+if [ -n "${MOCK_RM_FAIL_PATH:-}" ] && [ "$target" = "${MOCK_RM_FAIL_PATH}" ]; then
+  echo "mock rm failure: ${target}" >&2
+  exit 1
+fi
+
+exec /bin/rm "$@"
+EOF_MOCK
+
+  chmod +x "${mock_bin}/rm"
+}
+
+create_workspace_job_layout() {
+  local workspace_root="$1"
+  local job_id="$2"
+
+  mkdir -p "${workspace_root}/workspaces/${job_id}/.hivemoot"
+  mkdir -p "${workspace_root}/homes/${job_id}"
+  mkdir -p "${workspace_root}/runs/${job_id}"
+  mkdir -p "${workspace_root}/jobs/${job_id}"
+
+  printf '%s\n' "workspace-${job_id}" > "${workspace_root}/workspaces/${job_id}/payload.txt"
+  printf '%s\n' "home-${job_id}" > "${workspace_root}/homes/${job_id}/payload.txt"
+  printf '%s\n' "run-${job_id}" > "${workspace_root}/runs/${job_id}/payload.txt"
+  printf '%s\n' "job-${job_id}" > "${workspace_root}/jobs/${job_id}/payload.txt"
 }
 
 run_success_case() {
@@ -396,6 +451,45 @@ run_success_case() {
   assert_no_codex_auth_residue "${case_dir}/workspace/homes"
 
   echo "PASS: success case writes expected spawn flags and job artifacts"
+}
+
+run_custom_prompt_companion_base_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local prompt_dir="${case_dir}/custom-prompts"
+  local prompt_file="${prompt_dir}/task.md"
+  local base_file="${prompt_dir}/base.md"
+  local run_log=""
+
+  mkdir -p "$prompt_dir"
+  printf 'custom base prompt\n' > "$base_file"
+  printf 'custom task prompt\n' > "$prompt_file"
+  setup_mock_docker "${case_dir}/mock-bin"
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    TARGET_REPO="owner/repo" \
+    CONTROLLER_RUN_MODE="once" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_PROMPT_FILE="${prompt_file}" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    PERIODIC_INTERVAL_SECS="60" \
+    PERIODIC_JITTER_SECS="0" \
+    bash "${repo_root}/scripts/controller.sh"
+
+  run_log="${case_dir}/mock-state/docker-run.log"
+  [ -f "$run_log" ] || fail "missing docker run log in custom prompt case"
+  assert_file_contains "$run_log" "-e AGENT_PROMPT_FILE=${prompt_file}"
+  assert_file_contains "$run_log" "-v ${prompt_file}:${prompt_file}:ro"
+  assert_file_contains "$run_log" "-v ${base_file}:${base_file}:ro"
+
+  echo "PASS: custom prompt case mounts sibling base prompt"
 }
 
 run_failure_case() {
@@ -782,6 +876,7 @@ run_task_watch_case() {
   local case_dir="$2"
   local run_log=""
   local curl_log=""
+  local -a messages_files=()
   local -a status_files=()
   local -a summary_files=()
 
@@ -816,6 +911,7 @@ run_task_watch_case() {
   assert_file_contains "$run_log" "-e TARGET_REPO=owner/claimed"
   assert_file_contains "$run_log" "-e AGENT_TASK_ID=task-claim-1"
   assert_file_contains "$run_log" "-e AGENT_TASK_PROMPT=Inspect queue behavior"
+  assert_file_contains "$run_log" "-e AGENT_TASK_MESSAGES_FILE=/workspace/task-input/task-claim-1/messages.json"
   assert_file_contains "$run_log" "-e AGENT_TASK_CLAIM_TOKEN=claim-token-1"
   assert_file_contains "$run_log" "-e AGENT_TASK_EXECUTE_BASE_URL=https://api.example.com/api/tasks"
   assert_file_not_contains "$run_log" "-e RUN_MODE=once"
@@ -826,11 +922,15 @@ run_task_watch_case() {
   assert_file_contains "$curl_log" "AUTH=Authorization: Bearer shared-token"
 
   shopt -s nullglob
+  messages_files=("${case_dir}/workspace"/workspaces/*/task-input/task-claim-1/messages.json)
   status_files=("${case_dir}/workspace"/workspaces/*/.hivemoot/status)
   summary_files=("${case_dir}/workspace"/workspaces/*/.hivemoot/summary)
   shopt -u nullglob
+  assert_eq "1" "${#messages_files[@]}" "expected one task messages file for task-watch case"
   assert_eq "1" "${#status_files[@]}" "expected one status file for task-watch case"
   assert_eq "1" "${#summary_files[@]}" "expected one summary file for task-watch case"
+  assert_file_contains "${messages_files[0]}" "\"role\":\"user\""
+  assert_file_contains "${messages_files[0]}" "\"content\":\"Initial context\""
   assert_eq "completed" "$(cat "${status_files[0]}")" "expected completed task-watch status"
   assert_file_contains "${summary_files[0]}" "trigger=task"
 
@@ -1010,6 +1110,175 @@ run_task_watch_scope_validation_case() {
 
   assert_file_contains "${case_dir}/stderr.log" "TASK_DISPATCH_AGENT_IDS is required when WATCH_TASKS=1."
   echo "PASS: task-watch mode requires explicit dispatch scope"
+}
+
+run_workspace_prune_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local controller_log="${case_dir}/controller.log"
+  local stale_completed_job_id="job-stale-completed"
+  local stale_failed_job_id="job-stale-failed"
+  local stale_cancelled_job_id="job-stale-cancelled"
+  local fresh_job_id="job-fresh"
+  local non_terminal_job_id="job-in-progress"
+  local missing_status_job_id="job-missing-status"
+  local root=""
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+  setup_mock_curl "${case_dir}/mock-bin"
+
+  create_workspace_job_layout "${case_dir}/workspace" "$stale_completed_job_id"
+  create_workspace_job_layout "${case_dir}/workspace" "$stale_failed_job_id"
+  create_workspace_job_layout "${case_dir}/workspace" "$stale_cancelled_job_id"
+  create_workspace_job_layout "${case_dir}/workspace" "$fresh_job_id"
+  create_workspace_job_layout "${case_dir}/workspace" "$non_terminal_job_id"
+  create_workspace_job_layout "${case_dir}/workspace" "$missing_status_job_id"
+
+  printf '%s\n' "completed" > "${case_dir}/workspace/workspaces/${stale_completed_job_id}/.hivemoot/status"
+  printf '%s\n' "failed" > "${case_dir}/workspace/workspaces/${stale_failed_job_id}/.hivemoot/status"
+  printf '%s\n' "cancelled" > "${case_dir}/workspace/workspaces/${stale_cancelled_job_id}/.hivemoot/status"
+  printf '%s\n' "in-progress" > "${case_dir}/workspace/workspaces/${non_terminal_job_id}/.hivemoot/status"
+  sleep 2
+  printf '%s\n' "completed" > "${case_dir}/workspace/workspaces/${fresh_job_id}/.hivemoot/status"
+
+  mkdir -p "${case_dir}/workspace/scratch/${stale_completed_job_id}"
+  printf '%s\n' "keep-me" > "${case_dir}/workspace/scratch/${stale_completed_job_id}/keep.txt"
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_CURL_STATE_DIR="${case_dir}/curl-state" \
+    MOCK_TASK_CLAIM_MODE="empty" \
+    CONTROLLER_RUN_MODE="once" \
+    WATCH_TASKS="1" \
+    TASK_DISPATCH_AGENT_IDS="worker" \
+    AGENT_TASK_CLAIM_URL="https://api.example.com/api/tasks/claim" \
+    HIVEMOOT_AGENT_TOKEN="shared-token" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    WORKSPACE_TTL_SECS="1" \
+    PERIODIC_INTERVAL_SECS="60" \
+    PERIODIC_JITTER_SECS="0" \
+    bash "${repo_root}/scripts/controller.sh" >"$controller_log" 2>&1
+
+  for root in workspaces homes runs jobs; do
+    assert_not_exists "${case_dir}/workspace/${root}/${stale_completed_job_id}"
+    assert_not_exists "${case_dir}/workspace/${root}/${stale_failed_job_id}"
+    assert_not_exists "${case_dir}/workspace/${root}/${stale_cancelled_job_id}"
+    assert_exists "${case_dir}/workspace/${root}/${fresh_job_id}"
+    assert_exists "${case_dir}/workspace/${root}/${non_terminal_job_id}"
+    assert_exists "${case_dir}/workspace/${root}/${missing_status_job_id}"
+  done
+
+  assert_exists "${case_dir}/workspace/scratch/${stale_completed_job_id}/keep.txt"
+  assert_file_contains "$controller_log" "Pruned 3 stale workspace(s) (ttl=1s)"
+  assert_file_not_contains "$controller_log" "WARN: failed to fully prune"
+
+  echo "PASS: workspace pruning honors terminal-state/ttl guards and directory scope"
+}
+
+run_workspace_ttl_disabled_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local controller_log="${case_dir}/controller.log"
+  local stale_job_id="job-ttl-disabled"
+  local root=""
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+  setup_mock_curl "${case_dir}/mock-bin"
+
+  create_workspace_job_layout "${case_dir}/workspace" "$stale_job_id"
+  printf '%s\n' "completed" > "${case_dir}/workspace/workspaces/${stale_job_id}/.hivemoot/status"
+  sleep 2
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_CURL_STATE_DIR="${case_dir}/curl-state" \
+    MOCK_TASK_CLAIM_MODE="empty" \
+    CONTROLLER_RUN_MODE="once" \
+    WATCH_TASKS="1" \
+    TASK_DISPATCH_AGENT_IDS="worker" \
+    AGENT_TASK_CLAIM_URL="https://api.example.com/api/tasks/claim" \
+    HIVEMOOT_AGENT_TOKEN="shared-token" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    WORKSPACE_TTL_SECS="0" \
+    PERIODIC_INTERVAL_SECS="60" \
+    PERIODIC_JITTER_SECS="0" \
+    bash "${repo_root}/scripts/controller.sh" >"$controller_log" 2>&1
+
+  for root in workspaces homes runs jobs; do
+    assert_exists "${case_dir}/workspace/${root}/${stale_job_id}"
+  done
+
+  assert_file_not_contains "$controller_log" "stale workspace(s)"
+  echo "PASS: WORKSPACE_TTL_SECS=0 disables stale workspace pruning"
+}
+
+run_workspace_prune_failure_reporting_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local controller_log="${case_dir}/controller.log"
+  local stale_job_id="job-prune-failure"
+  local failed_path="${case_dir}/workspace/homes/${stale_job_id}"
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+  setup_mock_curl "${case_dir}/mock-bin"
+  setup_mock_rm_failer "${case_dir}/mock-bin"
+
+  create_workspace_job_layout "${case_dir}/workspace" "$stale_job_id"
+  printf '%s\n' "completed" > "${case_dir}/workspace/workspaces/${stale_job_id}/.hivemoot/status"
+  sleep 2
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_CURL_STATE_DIR="${case_dir}/curl-state" \
+    MOCK_TASK_CLAIM_MODE="empty" \
+    MOCK_RM_FAIL_PATH="${failed_path}" \
+    CONTROLLER_RUN_MODE="once" \
+    WATCH_TASKS="1" \
+    TASK_DISPATCH_AGENT_IDS="worker" \
+    AGENT_TASK_CLAIM_URL="https://api.example.com/api/tasks/claim" \
+    HIVEMOOT_AGENT_TOKEN="shared-token" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    WORKSPACE_TTL_SECS="1" \
+    PERIODIC_INTERVAL_SECS="60" \
+    PERIODIC_JITTER_SECS="0" \
+    bash "${repo_root}/scripts/controller.sh" >"$controller_log" 2>&1
+
+  assert_not_exists "${case_dir}/workspace/workspaces/${stale_job_id}"
+  assert_exists "${failed_path}"
+  assert_not_exists "${case_dir}/workspace/runs/${stale_job_id}"
+  assert_not_exists "${case_dir}/workspace/jobs/${stale_job_id}"
+
+  assert_file_contains "$controller_log" "mock rm failure: ${failed_path}"
+  assert_file_contains "$controller_log" "WARN: failed to remove stale workspace path: job_id=${stale_job_id} path=${failed_path}"
+  assert_file_contains "$controller_log" "WARN: stale workspace prune incomplete: job_id=${stale_job_id} path=${failed_path}"
+  assert_file_contains "$controller_log" "WARN: failed to fully prune 1 stale workspace(s) (ttl=1s)"
+  assert_file_not_contains "$controller_log" "Pruned 1 stale workspace(s) (ttl=1s)"
+
+  echo "PASS: workspace prune reports partial deletion failures"
 }
 
 run_shutdown_signal_case() {
@@ -1244,6 +1513,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 echo "Running controller script checks"
 run_success_case "$repo_root" "${tmpdir}/success"
+run_custom_prompt_companion_base_case "$repo_root" "${tmpdir}/custom-prompt-companion-base"
 run_failure_case "$repo_root" "${tmpdir}/failure"
 run_spawn_failure_cleanup_case "$repo_root" "${tmpdir}/spawn-failure"
 run_mentions_case "$repo_root" "${tmpdir}/mentions"
@@ -1255,6 +1525,9 @@ run_task_watch_token_file_case "$repo_root" "${tmpdir}/task-watch-token-file"
 run_task_watch_no_task_case "$repo_root" "${tmpdir}/task-watch-empty"
 run_task_watch_invalid_repo_case "$repo_root" "${tmpdir}/task-watch-invalid-repo"
 run_task_watch_scope_validation_case "$repo_root" "${tmpdir}/task-watch-scope-validation"
+run_workspace_prune_case "$repo_root" "${tmpdir}/workspace-prune"
+run_workspace_ttl_disabled_case "$repo_root" "${tmpdir}/workspace-ttl-disabled"
+run_workspace_prune_failure_reporting_case "$repo_root" "${tmpdir}/workspace-prune-failure-reporting"
 run_shutdown_signal_case "$repo_root" "${tmpdir}/shutdown"
 run_same_agent_concurrent_case "$repo_root" "${tmpdir}/same-agent-concurrent"
 run_periodic_deferral_cleanup_case "$repo_root" "${tmpdir}/periodic-deferral-cleanup"
