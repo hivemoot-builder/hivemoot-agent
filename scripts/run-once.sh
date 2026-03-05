@@ -715,7 +715,15 @@ case "$provider" in
       esac
     fi
 
-    codex_cmd_common=(--dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json)
+    # shell_environment_policy: syntax verified codex 0.107.0; end-to-end enforcement
+    # requires a live API session (not CI-verifiable). Fail-safe: if include_only
+    # does not enforce, agents see more env vars than expected but exfiltration paths
+    # remain covered by Claude deny rules (#200/#223) and container isolation (#25).
+    codex_cmd_common=(--full-auto \
+      --config 'sandbox_workspace_write.network_access=true' \
+      --config 'shell_environment_policy.inherit=none' \
+      --config 'shell_environment_policy.include_only=["GH_TOKEN","GITHUB_TOKEN","PATH","HOME","USER","SHELL","TERM"]' \
+      --skip-git-repo-check --json)
     if [ -n "$agent_model" ]; then
       codex_cmd_common+=(--model "$agent_model")
     fi
