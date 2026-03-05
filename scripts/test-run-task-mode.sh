@@ -743,6 +743,7 @@ LOG
     LOG_DIR="${case_dir}/logs" \
     HIVEMOOT_AGENT_TOKEN="task-token" \
     AGENT_TASK_EXECUTE_BASE_URL="https://api.example.com/api/tasks" \
+    AGENT_TASK_CLAIM_TOKEN="claim-token-codex-sidecar" \
     AGENT_TASK_ID="task-codex-sidecar" \
     AGENT_TASK_PROMPT="Return answer via sidecar" \
     TARGET_REPO="owner/repo" \
@@ -780,6 +781,7 @@ LOG
     LOG_DIR="${case_dir}/logs" \
     HIVEMOOT_AGENT_TOKEN="task-token" \
     AGENT_TASK_EXECUTE_BASE_URL="https://api.example.com/api/tasks" \
+    AGENT_TASK_CLAIM_TOKEN="claim-token-codex-sf" \
     AGENT_TASK_ID="task-codex-sf" \
     AGENT_TASK_PROMPT="Return answer via JSONL fallback" \
     TARGET_REPO="owner/repo" \
@@ -811,6 +813,7 @@ Some text response."
     LOG_DIR="${case_dir}/logs" \
     HIVEMOOT_AGENT_TOKEN="task-token" \
     AGENT_TASK_EXECUTE_BASE_URL="https://api.example.com/api/tasks" \
+    AGENT_TASK_CLAIM_TOKEN="claim-token-gemini-text" \
     AGENT_TASK_ID="task-gemini-text" \
     AGENT_TASK_PROMPT="Return text answer" \
     TARGET_REPO="owner/repo" \
@@ -843,6 +846,7 @@ Some text response."
     LOG_DIR="${case_dir}/logs" \
     HIVEMOOT_AGENT_TOKEN="task-token" \
     AGENT_TASK_EXECUTE_BASE_URL="https://api.example.com/api/tasks" \
+    AGENT_TASK_CLAIM_TOKEN="claim-token-claude-text" \
     AGENT_TASK_ID="task-claude-text" \
     AGENT_TASK_PROMPT="Return text answer" \
     TARGET_REPO="owner/repo" \
