@@ -5,6 +5,10 @@ description: >
   Classifies risk, detects injection and credential exposure, checks
   auth and permissions, dependency hygiene, and CI/CD security.
   Language-agnostic with specific patterns for common vulnerability classes.
+disallowedTools:
+  - Write
+  - Edit
+  - NotebookEdit
 ---
 
 ## Skill: Security Reviewer
