@@ -77,10 +77,14 @@ process.stdout.write(parts.join("\n\n"));
 }
 
 _cleanup_files=()
+_cleanup_dirs=()
 # shellcheck disable=SC2317,SC2329  # invoked via trap
 cleanup_once() {
   for f in "${_cleanup_files[@]-}"; do
     rm -f "$f" 2>/dev/null || true
+  done
+  for d in "${_cleanup_dirs[@]-}"; do
+    rm -rf "$d" 2>/dev/null || true
   done
 }
 trap cleanup_once EXIT
@@ -489,7 +493,9 @@ Local repository path: ${repo_dir}
 fi
 
 # Skill modules: capability blocks appended after the role context.
-if [ -n "$agent_skills" ]; then
+# Claude uses native --plugin-dir dispatch (see the claude provider section).
+# All other providers use V1 prompt-append here.
+if [ -n "$agent_skills" ] && [ "$provider" != "claude" ]; then
   skills_content=""
   if ! skills_content="$(load_skill_prompts "$agent_skills" "/opt/hivemoot-agent/skills")"; then
     exit 1
@@ -873,6 +879,30 @@ You are resuming a prior session for this mention thread. Some data in your cont
       "Read(/run/secrets/*)"
     )
 
+    # Skill modules: use Claude native --plugin-dir for enforced skill dispatch.
+    # --plugin-dir requires Claude 2.1.63+. On older versions, falls back to V1
+    # prompt-append so existing deployments are not broken.
+    claude_plugin_dir=""
+    if [ -n "$agent_skills" ]; then
+      if claude --help 2>&1 | grep -q -- '--plugin-dir'; then
+        if ! claude_plugin_dir="$(generate_claude_plugin_dir "$agent_skills" "/opt/hivemoot-agent/prompts/skills")"; then
+          exit 1
+        fi
+        _cleanup_dirs+=("$claude_plugin_dir")
+        log "Claude skills: native plugin-dir (${claude_plugin_dir})"
+      else
+        log "Claude skills: --plugin-dir unavailable (requires 2.1.63+); using prompt-append"
+        skills_content=""
+        if ! skills_content="$(load_skill_prompts "$agent_skills" "/opt/hivemoot-agent/prompts/skills")"; then
+          exit 1
+        fi
+        if [ -n "$skills_content" ]; then
+          system_prompt="${system_prompt}
+${skills_content}"
+        fi
+      fi
+    fi
+
     # In task mode, use text output format so the log IS the answer text.
     # Remove --verbose to keep stdout clean (verbose lines would pollute the
     # extracted result). Keep stream-json + verbose for non-task runs where
@@ -886,6 +916,9 @@ You are resuming a prior session for this mention thread. Some data in your cont
     claude_fresh_cmd+=(--append-system-prompt "$system_prompt")
     if [ -n "$agent_model" ]; then
       claude_fresh_cmd+=(--model "$agent_model")
+    fi
+    if [ -n "$claude_plugin_dir" ]; then
+      claude_fresh_cmd+=(--plugin-dir "$claude_plugin_dir")
     fi
     claude_fresh_cmd+=("$user_message")
 
@@ -940,6 +973,9 @@ You are resuming a prior session for this mention thread. Some data in your cont
       cmd+=(--append-system-prompt "$system_prompt")
       if [ -n "$agent_model" ]; then
         cmd+=(--model "$agent_model")
+      fi
+      if [ -n "$claude_plugin_dir" ]; then
+        cmd+=(--plugin-dir "$claude_plugin_dir")
       fi
       cmd+=("$claude_resume_user_message")
     else

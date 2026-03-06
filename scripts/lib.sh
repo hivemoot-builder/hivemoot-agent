@@ -254,6 +254,58 @@ ${body}
   printf '%s' "$result"
 }
 
+# Generate an ephemeral Claude --plugin-dir layout from AGENT_SKILLS.
+# Writes the following structure to a new temp directory:
+#
+#   <tmpdir>/.claude-plugin/plugin.json
+#   <tmpdir>/skills/<name>/SKILL.md     (copied from skills_dir)
+#
+# Returns the temp directory path on stdout on success.
+# On error, removes the temp directory and returns non-zero.
+# Callers must register the returned path for cleanup (e.g. _cleanup_dirs+=).
+#
+# Requires Claude 2.1.63+ for --plugin-dir support. Detect with:
+#   claude --help | grep -- '--plugin-dir'
+generate_claude_plugin_dir() {
+  local skills_list="$1"
+  local skills_dir="${2:-/opt/hivemoot-agent/prompts/skills}"
+
+  [ -z "$skills_list" ] && return 0
+
+  local plugin_dir
+  plugin_dir="$(mktemp -d)"
+
+  mkdir -p "${plugin_dir}/.claude-plugin"
+  printf '{"name":"hivemoot-skills","version":"1.0.0","description":"Composable skill modules for hivemoot-agent"}\n' \
+    > "${plugin_dir}/.claude-plugin/plugin.json"
+
+  local skills_plugin_dir="${plugin_dir}/skills"
+  mkdir -p "$skills_plugin_dir"
+
+  local skill skill_file
+  while IFS= read -r skill; do
+    skill="$(trim "$skill")"
+    [ -z "$skill" ] && continue
+    case "$skill" in
+      *[!a-zA-Z0-9_-]*)
+        printf 'Invalid skill name: '"'"'%s'"'"' (AGENT_SKILLS=%s)\n' "$skill" "$skills_list" >&2
+        rm -rf "$plugin_dir"
+        return 1
+        ;;
+    esac
+    skill_file="${skills_dir}/${skill}/SKILL.md"
+    if [ ! -f "$skill_file" ]; then
+      printf 'Skill file not found: %s (AGENT_SKILLS=%s)\n' "$skill_file" "$skills_list" >&2
+      rm -rf "$plugin_dir"
+      return 1
+    fi
+    mkdir -p "${skills_plugin_dir}/${skill}"
+    cp "$skill_file" "${skills_plugin_dir}/${skill}/SKILL.md"
+  done < <(tr ',' '\n' <<< "$skills_list")
+
+  printf '%s' "$plugin_dir"
+}
+
 validate_target_repo() {
   local target_repo="$1"
 
