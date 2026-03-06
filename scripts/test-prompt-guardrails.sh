@@ -71,10 +71,10 @@ assert_contains "$controller" "Untrusted mention payload:"
 
 # Claude native skill dispatch: skills for non-Claude providers still use
 # prompt-append (the Claude condition guards the V1 path).
-assert_contains "$run_once" '[ "$provider" != "claude" ]'
+assert_contains "$run_once" "[ \"\$provider\" != \"claude\" ]"
 # Claude skills use generate_claude_plugin_dir and --plugin-dir on both paths.
-assert_contains "$run_once" 'generate_claude_plugin_dir "$agent_skills"'
-assert_contains "$run_once" 'claude_fresh_cmd+=(--plugin-dir "$claude_plugin_dir")'
-assert_contains "$run_once" 'cmd+=(--plugin-dir "$claude_plugin_dir")'
+assert_contains "$run_once" "generate_claude_plugin_dir \"\$agent_skills\""
+assert_contains "$run_once" "claude_fresh_cmd+=(--plugin-dir \"\$claude_plugin_dir\")"
+assert_contains "$run_once" "cmd+=(--plugin-dir \"\$claude_plugin_dir\")"
 
 echo "PASS: prompt security guardrail checks"

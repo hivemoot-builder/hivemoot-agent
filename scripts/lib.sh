@@ -279,7 +279,8 @@ generate_claude_plugin_dir() {
   printf '{"name":"hivemoot-skills","version":"1.0.0","description":"Composable skill modules for hivemoot-agent"}\n' \
     > "${plugin_dir}/.claude-plugin/plugin.json"
 
-  local skills_plugin_dir="${plugin_dir}/skills"
+  local skills_plugin_dir
+  skills_plugin_dir="${plugin_dir}/skills"
   mkdir -p "$skills_plugin_dir"
 
   local skill skill_file
@@ -288,14 +289,14 @@ generate_claude_plugin_dir() {
     [ -z "$skill" ] && continue
     case "$skill" in
       *[!a-zA-Z0-9_-]*)
-        printf 'Invalid skill name: '"'"'%s'"'"' (AGENT_SKILLS=%s)\n' "$skill" "$skills_list" >&2
+        echo "Invalid skill name: '${skill}' (AGENT_SKILLS=${skills_list})" >&2
         rm -rf "$plugin_dir"
         return 1
         ;;
     esac
     skill_file="${skills_dir}/${skill}/SKILL.md"
     if [ ! -f "$skill_file" ]; then
-      printf 'Skill file not found: %s (AGENT_SKILLS=%s)\n' "$skill_file" "$skills_list" >&2
+      echo "Skill file not found: ${skill_file} (AGENT_SKILLS=${skills_list})" >&2
       rm -rf "$plugin_dir"
       return 1
     fi
