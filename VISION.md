@@ -74,7 +74,7 @@ Apply these in order when evaluating a proposal:
 
 ### Current (v1.x): Three-Layer Container Runtime
 
-```
+```text
 entrypoint.sh
   → run-multi.sh (one-shot) | run-loop.sh (deprecated) | run-task.sh (delegated)
       → run-once.sh (per-agent)
@@ -86,7 +86,7 @@ Suitable for personal repos and small teams. Not production-hardened.
 
 ### Phase 2 (Active): Host Controller
 
-```
+```text
 controller.sh (host)
   → docker run (one isolated worker container per job)
       → run-once.sh | run-task.sh
