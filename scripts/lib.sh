@@ -273,15 +273,15 @@ generate_claude_plugin_dir() {
   [ -z "$skills_list" ] && return 0
 
   local plugin_dir
-  plugin_dir="$(mktemp -d)"
+  plugin_dir="$(mktemp -d)" || { echo "generate_claude_plugin_dir: mktemp -d failed" >&2; return 1; }
 
-  mkdir -p "${plugin_dir}/.claude-plugin"
+  mkdir -p "${plugin_dir}/.claude-plugin" || { rm -rf "$plugin_dir"; return 1; }
   printf '{"name":"hivemoot-skills","version":"1.0.0","description":"Composable skill modules for hivemoot-agent"}\n' \
-    > "${plugin_dir}/.claude-plugin/plugin.json"
+    > "${plugin_dir}/.claude-plugin/plugin.json" || { rm -rf "$plugin_dir"; return 1; }
 
   local skills_plugin_dir
   skills_plugin_dir="${plugin_dir}/skills"
-  mkdir -p "$skills_plugin_dir"
+  mkdir -p "$skills_plugin_dir" || { rm -rf "$plugin_dir"; return 1; }
 
   local skill skill_file
   while IFS= read -r skill; do
@@ -300,8 +300,8 @@ generate_claude_plugin_dir() {
       rm -rf "$plugin_dir"
       return 1
     fi
-    mkdir -p "${skills_plugin_dir}/${skill}"
-    cp "$skill_file" "${skills_plugin_dir}/${skill}/SKILL.md"
+    mkdir -p "${skills_plugin_dir}/${skill}" || { rm -rf "$plugin_dir"; return 1; }
+    cp "$skill_file" "${skills_plugin_dir}/${skill}/SKILL.md" || { rm -rf "$plugin_dir"; return 1; }
   done < <(tr ',' '\n' <<< "$skills_list")
 
   printf '%s' "$plugin_dir"

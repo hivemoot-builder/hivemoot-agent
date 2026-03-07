@@ -450,6 +450,80 @@ test_shipped_skills_load() {
   echo "  ✓ All shipped skills load correctly (${expected_skills// /, })"
 }
 
+test_generate_claude_plugin_dir_basic() {
+  echo "Testing generate_claude_plugin_dir basic success..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  trap 'if [ -n "${tmp_dir:-}" ]; then rm -rf "$tmp_dir"; fi' EXIT
+
+  setup_test_skills "$tmp_dir"
+  source_lib
+
+  local plugin_dir
+  plugin_dir="$(generate_claude_plugin_dir "skill-one,skill-two" "$tmp_dir")"
+
+  if [ -z "$plugin_dir" ]; then
+    fail "generate_claude_plugin_dir should return a non-empty path"
+  fi
+
+  if [ ! -f "${plugin_dir}/.claude-plugin/plugin.json" ]; then
+    fail "plugin.json missing from plugin dir"
+  fi
+
+  if [ ! -f "${plugin_dir}/skills/skill-one/SKILL.md" ]; then
+    fail "skill-one/SKILL.md not copied into plugin dir"
+  fi
+
+  if [ ! -f "${plugin_dir}/skills/skill-two/SKILL.md" ]; then
+    fail "skill-two/SKILL.md not copied into plugin dir"
+  fi
+
+  # Frontmatter must be preserved (native Claude dispatch reads it directly)
+  if ! grep -q "name: skill-one" "${plugin_dir}/skills/skill-one/SKILL.md"; then
+    fail "generate_claude_plugin_dir must preserve frontmatter (raw cp)"
+  fi
+
+  rm -rf "$plugin_dir"
+  echo "  ✓ generate_claude_plugin_dir builds correct layout with frontmatter intact"
+}
+
+test_generate_claude_plugin_dir_cp_failure() {
+  echo "Testing generate_claude_plugin_dir fails closed on cp failure..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  trap 'if [ -n "${tmp_dir:-}" ]; then rm -rf "$tmp_dir"; fi' EXIT
+
+  setup_test_skills "$tmp_dir"
+  source_lib
+
+  # Override cp to simulate a write failure
+  cp() { return 1; }
+
+  local plugin_dir before_count after_count
+  before_count="$(find /tmp -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l || echo 0)"
+
+  if plugin_dir="$(generate_claude_plugin_dir "skill-one" "$tmp_dir" 2>/dev/null)"; then
+    unset -f cp
+    fail "generate_claude_plugin_dir should return non-zero when cp fails"
+  fi
+
+  unset -f cp
+
+  after_count="$(find /tmp -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l || echo 0)"
+
+  if [ "$after_count" -gt "$before_count" ]; then
+    fail "generate_claude_plugin_dir leaked a temp dir on cp failure (before=$before_count after=$after_count)"
+  fi
+
+  if [ -n "$plugin_dir" ]; then
+    fail "generate_claude_plugin_dir should output empty string on failure, got: $plugin_dir"
+  fi
+
+  echo "  ✓ generate_claude_plugin_dir fails closed and cleans up on cp failure"
+}
+
 echo "Running skill loading tests..."
 echo
 
@@ -464,6 +538,8 @@ test_empty_skill_list
 test_slot_specific_skill_loading
 test_preflight_check_agent_skill_lists
 test_shipped_skills_load
+test_generate_claude_plugin_dir_basic
+test_generate_claude_plugin_dir_cp_failure
 
 echo
 echo "All skill loading tests passed!"
