@@ -81,6 +81,26 @@ fi
 assert_contains "$run_once" "cmd=(gemini --yolo --output-format stream-json -p \"\$prompt\")"
 assert_contains "$run_once" "codex_fresh_cmd=(codex exec \"\${codex_cmd_common[@]}\" \"\$prompt\")"
 
+# Codex command construction must use the safe --full-auto flag and explicit env
+# allowlisting, not the legacy bypass flag that disables all sandboxing.
+if grep -Fq -- "--dangerously-bypass-approvals-and-sandbox" "$run_once"; then
+  fail "run-once.sh still contains --dangerously-bypass-approvals-and-sandbox; must use --full-auto"
+fi
+assert_contains "$run_once" "codex_cmd_common=(--full-auto"
+assert_contains "$run_once" "sandbox_workspace_write.network_access=true"
+assert_contains "$run_once" "shell_environment_policy.inherit=none"
+assert_contains "$run_once" "shell_environment_policy.include_only="
+# OPENAI_API_KEY must not appear in the env allowlist — it would expose the
+# provider credential to model-generated shell commands.
+if grep -Fq '"OPENAI_API_KEY"' "$run_once"; then
+  fail "run-once.sh includes OPENAI_API_KEY in the Codex env allowlist; remove it"
+fi
+# ANTHROPIC_API_KEY must not appear in the env allowlist either —
+# exposing provider credentials to model-generated shell commands is equally damaging.
+if grep -Fq '"ANTHROPIC_API_KEY"' "$run_once"; then
+  fail "run-once.sh includes ANTHROPIC_API_KEY in the Codex env allowlist; remove it"
+fi
+
 # Mention prompt must use URL-only approach — no untrusted title/body/author
 # embedded in the prompt. Verify the safe-field comment and that the
 # mention_prompt variable does not embed ${title} or ${body}.
