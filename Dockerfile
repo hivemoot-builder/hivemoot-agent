@@ -178,6 +178,7 @@ WORKDIR /workspace
 
 COPY --chown=node:node scripts /opt/hivemoot-agent/scripts
 COPY --chown=node:node prompts /opt/hivemoot-agent/prompts
+COPY --chown=node:node skills /opt/hivemoot-agent/skills
 
 RUN chmod +x /opt/hivemoot-agent/scripts/*.sh
 

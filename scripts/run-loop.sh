@@ -28,6 +28,7 @@ max_agents=10
 token_tmp_root="/tmp/hivemoot-agent-token-files"
 lock_dir="/tmp/agent-locks"
 agent_run_busy_exit=3
+run_once_script="${RUN_ONCE_SCRIPT:-/opt/hivemoot-agent/scripts/run-once.sh}"
 
 # Periodic scheduling (backward compat: fall back to BASE_SECS / JITTER_SECS)
 periodic_interval="${PERIODIC_INTERVAL_SECS:-${BASE_SECS:-3600}}"
@@ -100,50 +101,10 @@ validate_target_repo "$target_repo"
 # ── Agent Slot Parsing ─────────────────────────────────────────────
 
 declare -A seen_agents=()
+declare -A agent_skill_lists=()
 declare -a agent_ids=()
 declare -a agent_tokens=()
-
-for slot in $(seq 1 "$max_agents"); do
-  suffix="$(printf '%02d' "$slot")"
-  id_var="AGENT_ID_${suffix}"
-  token_var="AGENT_GITHUB_TOKEN_${suffix}"
-  token_file_var="${token_var}_FILE"
-
-  agent_id="$(trim "${!id_var:-}")"
-  token_inline="${!token_var:-}"
-  token_file="${!token_file_var:-}"
-
-  if [ -z "$agent_id" ] && [ -z "$token_inline" ] && [ -z "$token_file" ]; then
-    continue
-  fi
-
-  if [ -z "$agent_id" ]; then
-    echo "${id_var} is required when ${token_var} or ${token_file_var} is set." >&2
-    exit 1
-  fi
-
-  agent_token="$(load_slot_token "$suffix")"
-  if [ -z "$agent_token" ]; then
-    echo "Missing token for slot ${suffix}. Set ${token_var} or ${token_file_var}." >&2
-    exit 1
-  fi
-
-  validate_agent_id "$agent_id"
-
-  if [ -n "${seen_agents[$agent_id]:-}" ]; then
-    echo "Duplicate agent id detected: ${agent_id}" >&2
-    exit 1
-  fi
-  seen_agents["$agent_id"]=1
-
-  agent_ids+=("$agent_id")
-  agent_tokens+=("$agent_token")
-done
-
-if [ "${#agent_ids[@]}" -eq 0 ]; then
-  echo "No agents configured. Set AGENT_ID_01 + AGENT_GITHUB_TOKEN_01 (up to _10)." >&2
-  exit 1
-fi
+load_agent_slots "$max_agents"
 
 agent_count="${#agent_ids[@]}"
 
@@ -177,7 +138,7 @@ preflight_check() {
 
   local provider="${AGENT_PROVIDER:-claude}"
   local auth_mode="${AGENT_AUTH_MODE:-auto}"
-  local prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/default.md}"
+  local prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/system/autonomous.md}"
 
   if ! command -v "$provider" >/dev/null 2>&1; then
     echo "Pre-flight: ${provider} CLI is not installed." >&2
@@ -192,7 +153,19 @@ preflight_check() {
   if [ ! -f "$prompt_file" ]; then
     echo "Pre-flight: prompt file not found: ${prompt_file}" >&2
     failures=$((failures + 1))
+  else
+    if ! resolve_companion_base_prompt "$prompt_file" >/dev/null; then
+      if prompt_requires_companion_base "$prompt_file"; then
+        echo "Pre-flight: base prompt file not found: $(dirname "$prompt_file")/base.md" >&2
+        failures=$((failures + 1))
+      fi
+    fi
   fi
+
+  # Skill files exist
+  local skill_failures=0
+  preflight_check_agent_skill_lists "/opt/hivemoot-agent/skills" || skill_failures=$?
+  failures=$((failures + skill_failures))
 
   # Provider auth check
   local auth_failures=0
@@ -287,7 +260,7 @@ trap handle_shutdown TERM INT
 # Returns ${agent_run_busy_exit} when the agent was busy (lock not acquired).
 # Returns non-zero/non-3 on actual run-once.sh failure.
 #
-# Args: agent_id extra_prompt [ack_key state_file session_key]
+# Args: agent_id extra_prompt [ack_key state_file session_key consecutive_failures run_trigger]
 # When ack_key + state_file are provided and the run succeeds (exit 0),
 # calls `hivemoot ack` to mark the mention as read. On failure the mention
 # stays unread so the next poll cycle retries it.
@@ -298,14 +271,17 @@ try_run_agent() {
   local state_file="${4:-}"
   local session_key="${5:-}"
   local consecutive_failures_count="${6:-0}"
+  local run_trigger="${7:-periodic}"
   local lock_file="${lock_dir}/${agent_id}.lock"
   local token_file="${agent_token_files[$agent_id]}"
   local agent_workspace="${workspace_root}/agents/${agent_id}"
   local agent_repo="${agent_workspace}/repo"
   local agent_log_dir="${workspace_root}/runs/${agent_id}"
   local agent_home=""
+  local resolved_agent_skills=""
 
   agent_home="$(resolve_managed_agent_home "$workspace_root" "$agent_id" "$effective_auth_mode")"
+  resolved_agent_skills="$(resolve_agent_skill_list "$agent_id")"
 
   mkdir -p "$agent_workspace" "$agent_log_dir" "$agent_home"
 
@@ -324,11 +300,22 @@ try_run_agent() {
     export AGENT_EXTRA_PROMPT="$extra_prompt"
     export AGENT_SESSION_KEY="$session_key"
     export AGENT_CONSECUTIVE_FAILURES="$consecutive_failures_count"
+    if [ -n "$resolved_agent_skills" ]; then
+      export AGENT_SKILLS="$resolved_agent_skills"
+    else
+      unset AGENT_SKILLS
+    fi
+    # Keep next_run_at scoped to periodic scheduler runs only.
+    if [ "$run_trigger" = "periodic" ]; then
+      export PERIODIC_INTERVAL_SECS="$periodic_interval"
+    else
+      unset PERIODIC_INTERVAL_SECS
+    fi
 
     unset AGENT_GITHUB_TOKEN GITHUB_TOKEN GH_TOKEN
 
     agent_exit=0
-    /opt/hivemoot-agent/scripts/run-once.sh || agent_exit=$?
+    "$run_once_script" || agent_exit=$?
 
     if [ "$agent_exit" -ne 0 ]; then
       log "${agent_id}: run exited with code ${agent_exit}"
@@ -468,7 +455,7 @@ Then read the full thread, research the topic, and take appropriate action with 
         # Redirect stdin from /dev/null so the backgrounded child doesn't inherit
         # the pipe fd — inherited pipe fds can flip to O_NONBLOCK and cause the
         # parent while-read loop to fail with EAGAIN, killing the watcher.
-        try_run_agent "$agent_id" "$combined_prompt" "$ack_key" "$state_file" "$mention_session_key" </dev/null &
+        try_run_agent "$agent_id" "$combined_prompt" "$ack_key" "$state_file" "$mention_session_key" "0" "mention" </dev/null &
 
       done || true  # Don't let pipefail+errexit kill the restart loop
 
@@ -542,7 +529,7 @@ start_agent_periodic_scheduler() {
 
       # Run agent
       local run_status=0
-      try_run_agent "$agent_id" "$global_extra_prompt" "" "" "" "$consecutive_failures" || run_status=$?
+      try_run_agent "$agent_id" "$global_extra_prompt" "" "" "" "$consecutive_failures" "periodic" || run_status=$?
 
       if [ "$run_status" -eq 0 ]; then
         if [ "$consecutive_failures" -gt 0 ]; then
