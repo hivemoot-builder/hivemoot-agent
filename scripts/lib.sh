@@ -268,7 +268,7 @@ ${body}
 #   claude --help | grep -- '--plugin-dir'
 generate_claude_plugin_dir() {
   local skills_list="$1"
-  local skills_dir="${2:-/opt/hivemoot-agent/prompts/skills}"
+  local skills_dir="${2:-/opt/hivemoot-agent/skills}"
 
   [ -z "$skills_list" ] && return 0
 
