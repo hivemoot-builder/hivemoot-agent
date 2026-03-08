@@ -101,6 +101,7 @@ validate_target_repo "$target_repo"
 # ── Agent Slot Parsing ─────────────────────────────────────────────
 
 declare -A seen_agents=()
+declare -A agent_skill_lists=()
 declare -a agent_ids=()
 declare -a agent_tokens=()
 load_agent_slots "$max_agents"
@@ -160,6 +161,11 @@ preflight_check() {
       fi
     fi
   fi
+
+  # Skill files exist
+  local skill_failures=0
+  preflight_check_agent_skill_lists "/opt/hivemoot-agent/skills" || skill_failures=$?
+  failures=$((failures + skill_failures))
 
   # Provider auth check
   local auth_failures=0
@@ -272,8 +278,10 @@ try_run_agent() {
   local agent_repo="${agent_workspace}/repo"
   local agent_log_dir="${workspace_root}/runs/${agent_id}"
   local agent_home=""
+  local resolved_agent_skills=""
 
   agent_home="$(resolve_managed_agent_home "$workspace_root" "$agent_id" "$effective_auth_mode")"
+  resolved_agent_skills="$(resolve_agent_skill_list "$agent_id")"
 
   mkdir -p "$agent_workspace" "$agent_log_dir" "$agent_home"
 
@@ -292,6 +300,11 @@ try_run_agent() {
     export AGENT_EXTRA_PROMPT="$extra_prompt"
     export AGENT_SESSION_KEY="$session_key"
     export AGENT_CONSECUTIVE_FAILURES="$consecutive_failures_count"
+    if [ -n "$resolved_agent_skills" ]; then
+      export AGENT_SKILLS="$resolved_agent_skills"
+    else
+      unset AGENT_SKILLS
+    fi
     # Keep next_run_at scoped to periodic scheduler runs only.
     if [ "$run_trigger" = "periodic" ]; then
       export PERIODIC_INTERVAL_SECS="$periodic_interval"

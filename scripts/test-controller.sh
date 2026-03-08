@@ -71,6 +71,41 @@ assert_no_codex_auth_residue() {
   fi
 }
 
+assert_no_gemini_auth_residue() {
+  local homes_root="$1"
+  local auth_file=""
+  local -a auth_files=()
+  local -a gemini_auth_files=(
+    "oauth_creds.json"
+    "google_accounts.json"
+    "settings.json"
+    "mcp-oauth-tokens.json"
+    "mcp-oauth-tokens-v2.json"
+    ".env"
+  )
+
+  shopt -s nullglob
+  for auth_file in "${gemini_auth_files[@]}"; do
+    auth_files+=("${homes_root}"/*/.gemini/"${auth_file}")
+  done
+  shopt -u nullglob
+
+  if [ "${#auth_files[@]}" -ne 0 ]; then
+    echo "Unexpected Gemini auth file residue:" >&2
+    printf '  %s\n' "${auth_files[@]}" >&2
+    fail "leftover Gemini auth file in job home"
+  fi
+}
+
+seed_gemini_auth_dir() {
+  local gemini_auth_dir="$1"
+
+  mkdir -p "$gemini_auth_dir"
+  printf '{"refresh_token":"gemini-test-token"}\n' > "${gemini_auth_dir}/oauth_creds.json"
+  printf '[{"email":"gemini@example.com"}]\n' > "${gemini_auth_dir}/google_accounts.json"
+  printf '{"selectedType":"oauth-personal"}\n' > "${gemini_auth_dir}/settings.json"
+}
+
 setup_mock_docker() {
   local mock_bin="$1"
   mkdir -p "$mock_bin"
@@ -134,6 +169,44 @@ next_id() {
   printf 'mock-container-%s' "$current"
 }
 
+snapshot_job_home() {
+  local arg=""
+  local mount_spec=""
+  local job_home=""
+  local snapshot_file="${state_dir}/job-home-snapshots.log"
+
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+      -v)
+        mount_spec="${2:-}"
+        if [[ "$mount_spec" == *:/home/node ]]; then
+          job_home="${mount_spec%:/home/node}"
+        fi
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "$job_home" ]; then
+    printf '%s\n' "job_home=missing gemini_settings=missing" >> "$snapshot_file"
+    return 0
+  fi
+
+  if [ -f "${job_home}/.gemini/settings.json" ]; then
+    printf 'job_home=%s gemini_settings=%s\n' \
+      "$job_home" \
+      "$(tr -d '\n' < "${job_home}/.gemini/settings.json")" \
+      >> "$snapshot_file"
+    return 0
+  fi
+
+  printf 'job_home=%s gemini_settings=missing\n' "$job_home" >> "$snapshot_file"
+}
+
 case "$cmd" in
   run)
     # mkdir is atomic and keeps overlap detection deterministic under concurrency.
@@ -141,6 +214,7 @@ case "$cmd" in
       echo "overlap" >> "$overlap_file"
     fi
 
+    snapshot_job_home "$@"
     printf '%s\n' "$*" >> "$run_log_file"
 
     if [ "${MOCK_DOCKER_RUN_FAIL:-0}" = "1" ]; then
@@ -272,6 +346,7 @@ output_file=""
 write_format=""
 auth_header=""
 url=""
+data=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -289,10 +364,20 @@ while [ "$#" -gt 0 ]; do
       fi
       shift 2
       ;;
-    -X|-d)
+    -X)
       shift 2
       ;;
-    -s|-S|-sS)
+    -d)
+      data="${2:-}"
+      shift 2
+      ;;
+    -s|-S|-sS|-sf)
+      shift
+      ;;
+    --max-time)
+      shift 2
+      ;;
+    -*)
       shift
       ;;
     *)
@@ -302,7 +387,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-printf 'URL=%s AUTH=%s\n' "$url" "$auth_header" >> "${state_dir}/curl.log"
+printf 'URL=%s AUTH=%s DATA=%s\n' "$url" "$auth_header" "$data" >> "${state_dir}/curl.log"
 
 status="200"
   body='{"task":{"task_id":"task-claim-1","prompt":"Inspect queue behavior","repos":["owner/claimed"]},"claim_token":"claim-token-1","messages":[{"role":"user","content":"Initial context","created_at":"2026-03-05T03:00:00.000Z"},{"role":"system","content":"Task reopened","created_at":"2026-03-05T03:05:00.000Z"}]}'
@@ -333,6 +418,35 @@ fi
 EOF_MOCK
 
   chmod +x "${mock_bin}/curl"
+}
+
+setup_mock_uname_linux() {
+  local mock_bin="$1"
+  mkdir -p "$mock_bin"
+
+  cat > "${mock_bin}/uname" <<'EOF_MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "Linux"
+EOF_MOCK
+
+  chmod +x "${mock_bin}/uname"
+}
+
+setup_mock_chown_logger() {
+  local mock_bin="$1"
+  mkdir -p "$mock_bin"
+
+  cat > "${mock_bin}/chown" <<'EOF_MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_dir="${MOCK_CHOWN_STATE_DIR:?MOCK_CHOWN_STATE_DIR is required}"
+mkdir -p "$state_dir"
+
+printf '%s\n' "$*" >> "${state_dir}/chown.log"
+EOF_MOCK
+
+  chmod +x "${mock_bin}/chown"
 }
 
 setup_mock_rm_failer() {
@@ -378,10 +492,14 @@ run_success_case() {
   local repo_root="$1"
   local case_dir="$2"
   local codex_auth_source="${case_dir}/secrets/codex-auth.json"
+  local gemini_auth_dir="${case_dir}/secrets/gemini-auth"
+  local settings_snapshot=""
+  local settings_count=""
 
   mkdir -p "$case_dir"
   mkdir -p "${case_dir}/secrets"
   printf '{"access_token":"test-token"}\n' > "$codex_auth_source"
+  seed_gemini_auth_dir "$gemini_auth_dir"
   setup_mock_docker "${case_dir}/mock-bin"
 
   env -i \
@@ -400,6 +518,7 @@ run_success_case() {
     AGENT_GITHUB_TOKEN_02="token-2" \
     AGENT_TIMEOUT_SECONDS="120" \
     CODEX_AUTH_FILE="${codex_auth_source}" \
+    GEMINI_AUTH_DIR="${gemini_auth_dir}" \
     GIT_CLONE_DEPTH="1" \
     SHARED_CLONE_CACHE="0" \
     PERIODIC_INTERVAL_SECS="60" \
@@ -411,6 +530,8 @@ run_success_case() {
 
   run_log="${case_dir}/mock-state/docker-run.log"
   [ -f "$run_log" ] || fail "missing docker run log"
+  settings_snapshot="${case_dir}/mock-state/job-home-snapshots.log"
+  [ -f "$settings_snapshot" ] || fail "missing job home snapshot log"
 
   assert_file_contains "$run_log" "--cap-drop=ALL"
   assert_file_contains "$run_log" "--security-opt=no-new-privileges"
@@ -422,6 +543,10 @@ run_success_case() {
   assert_file_contains "$run_log" "-e HIVEMOOT_CLI_UPDATE=skip"
   assert_file_contains "$run_log" "-e GIT_CLONE_DEPTH=1"
   assert_file_contains "$run_log" "-e SHARED_CLONE_CACHE=0"
+  assert_file_not_contains "$settings_snapshot" "gemini_settings=missing"
+  assert_file_contains "$settings_snapshot" 'gemini_settings={"selectedType":"oauth-personal"}'
+  settings_count="$(grep -Fc 'gemini_settings={"selectedType":"oauth-personal"}' "$settings_snapshot" | tr -d '[:space:]')"
+  assert_eq "2" "$settings_count" "expected Gemini settings.json in each job home before launch"
 
   shopt -s nullglob
   status_files=("${case_dir}/workspace"/workspaces/*/.hivemoot/status)
@@ -449,8 +574,113 @@ run_success_case() {
     assert_file_contains "$spec_file" '"timeout_seconds": 120'
   done
   assert_no_codex_auth_residue "${case_dir}/workspace/homes"
+  assert_no_gemini_auth_residue "${case_dir}/workspace/homes"
 
   echo "PASS: success case writes expected spawn flags and job artifacts"
+}
+
+run_per_agent_skill_routing_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local custom_skill_dir="${case_dir}/custom-skills/skill-one"
+  local custom_mount=""
+  local run_log=""
+  local worker_line=""
+  local builder_line=""
+
+  mkdir -p "$custom_skill_dir"
+  cat > "${custom_skill_dir}/SKILL.md" <<'EOF_SKILL'
+---
+name: skill-one
+description: Test custom skill
+---
+## Skill: Test Custom Skill
+EOF_SKILL
+
+  custom_mount="${custom_skill_dir}:/opt/hivemoot-agent/skills/skill-one:ro"
+
+  setup_mock_docker "${case_dir}/mock-bin"
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    TARGET_REPO="owner/repo" \
+    CONTROLLER_RUN_MODE="once" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_SKILLS_01="skill-one,release-readiness" \
+    AGENT_ID_02="builder" \
+    AGENT_GITHUB_TOKEN_02="token-2" \
+    AGENT_SKILLS_02="proposal-architect" \
+    AGENT_SKILL_BIND_MOUNTS="${custom_mount}" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    bash "${repo_root}/scripts/controller.sh"
+
+  run_log="${case_dir}/mock-state/docker-run.log"
+  [ -f "$run_log" ] || fail "missing docker run log in per-agent skill routing case"
+
+  worker_line="$(grep -F "AGENT_ID_01=worker" "$run_log" | head -n 1 || true)"
+  builder_line="$(grep -F "AGENT_ID_01=builder" "$run_log" | head -n 1 || true)"
+  [ -n "$worker_line" ] || fail "missing worker launch in per-agent skill routing case"
+  [ -n "$builder_line" ] || fail "missing builder launch in per-agent skill routing case"
+
+  if [[ "$worker_line" != *"AGENT_SKILLS=skill-one,release-readiness"* ]]; then
+    fail "worker launch did not receive worker-specific skills"
+  fi
+
+  if [[ "$builder_line" != *"AGENT_SKILLS=proposal-architect"* ]]; then
+    fail "builder launch did not receive builder-specific skills"
+  fi
+
+  if [[ "$worker_line" != *"${custom_mount}"* ]]; then
+    fail "custom skill bind mount missing from worker launch"
+  fi
+
+  if [[ "$builder_line" != *"${custom_mount}"* ]]; then
+    fail "custom skill bind mount missing from builder launch"
+  fi
+
+  echo "PASS: controller routes per-agent skills and custom skill bind mounts"
+}
+
+run_invalid_skill_bind_mount_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local mount_spec="$3"
+  local expected_error="$4"
+  local controller_log="${case_dir}/controller.log"
+  local run_log="${case_dir}/mock-state/docker-run.log"
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+
+  if env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    TARGET_REPO="owner/repo" \
+    CONTROLLER_RUN_MODE="once" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_SKILL_BIND_MOUNTS="${mount_spec}" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    bash "${repo_root}/scripts/controller.sh" >"$controller_log" 2>&1; then
+    fail "controller succeeded unexpectedly for invalid skill bind mount: ${mount_spec}"
+  fi
+
+  assert_file_contains "$controller_log" "$expected_error"
+  if [ -f "$run_log" ] && [ -s "$run_log" ]; then
+    fail "controller should reject invalid skill bind mounts before docker run"
+  fi
+
+  echo "PASS: invalid skill bind mount rejected (${mount_spec})"
 }
 
 run_custom_prompt_companion_base_case() {
@@ -496,10 +726,12 @@ run_failure_case() {
   local repo_root="$1"
   local case_dir="$2"
   local codex_auth_source="${case_dir}/secrets/codex-auth.json"
+  local gemini_auth_dir="${case_dir}/secrets/gemini-auth"
 
   mkdir -p "$case_dir"
   mkdir -p "${case_dir}/secrets"
   printf '{"access_token":"test-token"}\n' > "$codex_auth_source"
+  seed_gemini_auth_dir "$gemini_auth_dir"
   setup_mock_docker "${case_dir}/mock-bin"
 
   if env -i \
@@ -516,6 +748,7 @@ run_failure_case() {
     AGENT_GITHUB_TOKEN_01="token-1" \
     AGENT_TIMEOUT_SECONDS="90" \
     CODEX_AUTH_FILE="${codex_auth_source}" \
+    GEMINI_AUTH_DIR="${gemini_auth_dir}" \
     PERIODIC_INTERVAL_SECS="60" \
     PERIODIC_JITTER_SECS="0" \
     bash "${repo_root}/scripts/controller.sh"; then
@@ -534,6 +767,7 @@ run_failure_case() {
   assert_file_contains "${summary_files[0]}" "status=failed"
   assert_file_contains "${summary_files[0]}" "exit_code=17"
   assert_no_codex_auth_residue "${case_dir}/workspace/homes"
+  assert_no_gemini_auth_residue "${case_dir}/workspace/homes"
 
   echo "PASS: failure case records failed sentinel with exit code"
 }
@@ -542,10 +776,12 @@ run_spawn_failure_cleanup_case() {
   local repo_root="$1"
   local case_dir="$2"
   local codex_auth_source="${case_dir}/secrets/codex-auth.json"
+  local gemini_auth_dir="${case_dir}/secrets/gemini-auth"
 
   mkdir -p "$case_dir"
   mkdir -p "${case_dir}/secrets"
   printf '{"access_token":"test-token"}\n' > "$codex_auth_source"
+  seed_gemini_auth_dir "$gemini_auth_dir"
   setup_mock_docker "${case_dir}/mock-bin"
 
   if env -i \
@@ -562,6 +798,7 @@ run_spawn_failure_cleanup_case() {
     AGENT_GITHUB_TOKEN_01="token-1" \
     AGENT_TIMEOUT_SECONDS="90" \
     CODEX_AUTH_FILE="${codex_auth_source}" \
+    GEMINI_AUTH_DIR="${gemini_auth_dir}" \
     PERIODIC_INTERVAL_SECS="60" \
     PERIODIC_JITTER_SECS="0" \
     bash "${repo_root}/scripts/controller.sh"; then
@@ -569,8 +806,9 @@ run_spawn_failure_cleanup_case() {
   fi
 
   assert_no_codex_auth_residue "${case_dir}/workspace/homes"
+  assert_no_gemini_auth_residue "${case_dir}/workspace/homes"
 
-  echo "PASS: spawn failure cleanup removes copied Codex auth files"
+  echo "PASS: spawn failure cleanup removes copied provider auth files"
 }
 
 run_mentions_case() {
@@ -935,6 +1173,54 @@ run_task_watch_case() {
   assert_file_contains "${summary_files[0]}" "trigger=task"
 
   echo "PASS: task-watch mode claims and runs delegated tasks"
+}
+
+run_task_watch_linux_permission_repair_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local chown_log=""
+  local task_input_dir=""
+  local -a messages_files=()
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+  setup_mock_curl "${case_dir}/mock-bin"
+  setup_mock_uname_linux "${case_dir}/mock-bin"
+  setup_mock_chown_logger "${case_dir}/mock-bin"
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_DOCKER_WAIT_SLEEP_SECS="0" \
+    MOCK_CURL_STATE_DIR="${case_dir}/curl-state" \
+    MOCK_CHOWN_STATE_DIR="${case_dir}/chown-state" \
+    CONTROLLER_RUN_MODE="once" \
+    WATCH_TASKS="1" \
+    TASK_DISPATCH_AGENT_IDS="worker" \
+    AGENT_TASK_CLAIM_URL="https://api.example.com/api/tasks/claim" \
+    HIVEMOOT_AGENT_TOKEN="shared-token" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    PERIODIC_INTERVAL_SECS="60" \
+    PERIODIC_JITTER_SECS="0" \
+    bash "${repo_root}/scripts/controller.sh"
+
+  shopt -s nullglob
+  messages_files=("${case_dir}/workspace"/workspaces/*/task-input/task-claim-1/messages.json)
+  shopt -u nullglob
+  assert_eq "1" "${#messages_files[@]}" "expected one task messages file for Linux permission repair case"
+
+  task_input_dir="$(dirname "$(dirname "${messages_files[0]}")")"
+  chown_log="${case_dir}/chown-state/chown.log"
+  [ -f "$chown_log" ] || fail "missing chown log in Linux permission repair case"
+  assert_file_contains "$chown_log" "-R 1000:1000 ${task_input_dir}"
+
+  echo "PASS: task-watch mode repairs Linux task-input ownership before worker start"
 }
 
 run_task_watch_token_file_case() {
@@ -1585,12 +1871,69 @@ run_periodic_deferral_cleanup_case() {
   echo "PASS: periodic deferrals finalize queue artifacts (controller_exit=${controller_status})"
 }
 
+run_task_failure_report_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local curl_log=""
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+  setup_mock_curl "${case_dir}/mock-bin"
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_DOCKER_WAIT_EXIT="17" \
+    MOCK_CURL_STATE_DIR="${case_dir}/curl-state" \
+    CONTROLLER_RUN_MODE="once" \
+    WATCH_TASKS="1" \
+    TASK_DISPATCH_AGENT_IDS="worker" \
+    AGENT_TASK_CLAIM_URL="https://api.example.com/api/tasks/claim" \
+    AGENT_TASK_EXECUTE_BASE_URL="https://api.example.com/api/tasks" \
+    HIVEMOOT_AGENT_TOKEN="shared-token" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    bash "${repo_root}/scripts/controller.sh" || true
+
+  curl_log="${case_dir}/curl-state/curl.log"
+  [ -f "$curl_log" ] || fail "missing curl log in task-failure-report case"
+
+  # Failure report must be POSTed to the execute endpoint when worker exits non-zero.
+  assert_file_contains "$curl_log" "URL=https://api.example.com/api/tasks/task-claim-1/execute"
+  assert_file_contains "$curl_log" 'DATA={"action":"fail"'
+  assert_file_contains "$curl_log" "AUTH=Authorization: Bearer shared-token"
+
+  echo "PASS: task failure is reported to execute endpoint when worker exits non-zero"
+}
+
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmpdir="$(mktemp -d "${repo_root}/.tmp-controller-test.XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT
 
 echo "Running controller script checks"
 run_success_case "$repo_root" "${tmpdir}/success"
+run_per_agent_skill_routing_case "$repo_root" "${tmpdir}/per-agent-skill-routing"
+run_invalid_skill_bind_mount_case \
+  "$repo_root" \
+  "${tmpdir}/invalid-skill-bind-mount-traversal" \
+  "${tmpdir}/custom-skill:/opt/hivemoot-agent/skills/../../etc:ro" \
+  "AGENT_SKILL_BIND_MOUNTS contains path traversal:"
+run_invalid_skill_bind_mount_case \
+  "$repo_root" \
+  "${tmpdir}/invalid-skill-bind-mount-relative" \
+  "relative-skill:/opt/hivemoot-agent/skills/skill-one:ro" \
+  "AGENT_SKILL_BIND_MOUNTS contains invalid mount spec:"
+run_invalid_skill_bind_mount_case \
+  "$repo_root" \
+  "${tmpdir}/invalid-skill-bind-mount-destination" \
+  "${tmpdir}/custom-skill:/opt/hivemoot-agent/custom-skills/skill-one:ro" \
+  "AGENT_SKILL_BIND_MOUNTS contains invalid mount spec:"
 run_custom_prompt_companion_base_case "$repo_root" "${tmpdir}/custom-prompt-companion-base"
 run_failure_case "$repo_root" "${tmpdir}/failure"
 run_spawn_failure_cleanup_case "$repo_root" "${tmpdir}/spawn-failure"
@@ -1599,6 +1942,7 @@ run_mentions_dedup_case "$repo_root" "${tmpdir}/mentions-dedup"
 run_orphan_recovery_case "$repo_root" "${tmpdir}/orphan-recovery"
 run_mentions_retry_after_failure_case "$repo_root" "${tmpdir}/mentions-retry"
 run_task_watch_case "$repo_root" "${tmpdir}/task-watch"
+run_task_watch_linux_permission_repair_case "$repo_root" "${tmpdir}/task-watch-linux-permissions"
 run_task_watch_token_file_case "$repo_root" "${tmpdir}/task-watch-token-file"
 run_task_watch_no_task_case "$repo_root" "${tmpdir}/task-watch-empty"
 run_task_watch_invalid_repo_case "$repo_root" "${tmpdir}/task-watch-invalid-repo"
@@ -1610,4 +1954,5 @@ run_shutdown_signal_case "$repo_root" "${tmpdir}/shutdown"
 run_shutdown_subshell_bounded_exit_case "$repo_root" "${tmpdir}/shutdown-subshell-bounded-exit"
 run_same_agent_concurrent_case "$repo_root" "${tmpdir}/same-agent-concurrent"
 run_periodic_deferral_cleanup_case "$repo_root" "${tmpdir}/periodic-deferral-cleanup"
+run_task_failure_report_case "$repo_root" "${tmpdir}/task-failure-report"
 echo "PASS: controller script checks"

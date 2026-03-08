@@ -11,6 +11,8 @@ log() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
+# shellcheck source=scripts/health-reporter.sh
+. "${SCRIPT_DIR}/health-reporter.sh"
 
 bash_major="${BASH_VERSINFO[0]:-0}"
 print_bash_upgrade_hint() {
@@ -167,6 +169,31 @@ append_env_if_set() {
   fi
 }
 
+append_bind_mount_specs() {
+  local var_name="$1"
+  local mounts="${!var_name:-}"
+  local mount_spec=""
+
+  [ -z "$mounts" ] && return 0
+
+  while IFS= read -r mount_spec; do
+    mount_spec="$(trim "$mount_spec")"
+    [ -z "$mount_spec" ] && continue
+    case "$mount_spec" in
+      *..*)
+        echo "${var_name} contains path traversal: ${mount_spec}" >&2
+        return 1
+        ;;
+      /*:/opt/hivemoot-agent/skills/*:ro) ;;
+      *)
+        echo "${var_name} contains invalid mount spec: ${mount_spec}" >&2
+        return 1
+        ;;
+    esac
+    docker_run_args+=( -v "$mount_spec" )
+  done <<< "$mounts"
+}
+
 append_secret_env() {
   local var_name="$1"
   local file_var_name="${var_name}_FILE"
@@ -202,9 +229,51 @@ append_secret_env() {
 
 cleanup_job_home_credentials() {
   local job_home="$1"
+  local gemini_auth_dir="${job_home}/.gemini"
+  local auth_file=""
+  local -a gemini_auth_files=(
+    "oauth_creds.json"
+    "google_accounts.json"
+    "settings.json"
+    "mcp-oauth-tokens.json"
+    "mcp-oauth-tokens-v2.json"
+    ".env"
+  )
 
   rm -f "${job_home}/.codex/auth.json" 2>/dev/null || true
   rmdir "${job_home}/.codex" 2>/dev/null || true
+
+  for auth_file in "${gemini_auth_files[@]}"; do
+    rm -f "${gemini_auth_dir}/${auth_file}" 2>/dev/null || true
+  done
+  rmdir "${gemini_auth_dir}" 2>/dev/null || true
+}
+
+# POST action=fail to the task execute endpoint from the controller.
+# Safety net for crashes/OOM where run-task.sh exits before self-reporting.
+# Best-effort: errors are logged but never affect the caller's flow.
+#
+# Requires globals: task_execute_base_url, task_executor_token
+report_task_failure_from_controller() {
+  local task_id="$1"
+  local exit_code="$2"
+  local url=""
+  local payload=""
+
+  if [ -z "${task_execute_base_url:-}" ] || [ -z "${task_executor_token:-}" ]; then
+    return 0
+  fi
+
+  url="${task_execute_base_url%/}/${task_id}/execute"
+  payload="$(jq -cn --arg action "fail" --arg error "Worker exited with code ${exit_code}" \
+    '{action: $action, error: $error}')"
+
+  curl -sf -X POST "$url" \
+    -H "Authorization: Bearer ${task_executor_token}" \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    --max-time 10 \
+    >/dev/null 2>&1
 }
 
 spawn_worker() {
@@ -225,11 +294,14 @@ spawn_worker() {
   local container_name="${worker_name_prefix}-${job_id}"
   local prompt_file="${AGENT_PROMPT_FILE:-}"
   local companion_base_prompt=""
+  local job_agent_skills=""
   local worker_run_mode="once"
 
   if [ "$trigger_type" = "task" ]; then
     worker_run_mode="task"
   fi
+
+  job_agent_skills="$(resolve_agent_skill_list "$agent_id")"
 
   docker_run_args=(
     run
@@ -261,6 +333,21 @@ spawn_worker() {
     chmod 600 "${job_home}/.codex/auth.json"
     if [[ "$(uname -s)" == "Linux" ]]; then
       chown -R 1000:1000 "${job_home}/.codex" 2>/dev/null || true
+    fi
+  fi
+
+  # Copy gemini subscription auth (OAuth creds) into the worker's home.
+  local gemini_auth_dir="${GEMINI_AUTH_DIR:-}"
+  if [ -n "$gemini_auth_dir" ] && [ -d "$gemini_auth_dir" ]; then
+    mkdir -p "${job_home}/.gemini"
+    for f in oauth_creds.json google_accounts.json settings.json; do
+      if [ -f "${gemini_auth_dir}/${f}" ]; then
+        cp "${gemini_auth_dir}/${f}" "${job_home}/.gemini/${f}"
+        chmod 600 "${job_home}/.gemini/${f}"
+      fi
+    done
+    if [[ "$(uname -s)" == "Linux" ]]; then
+      chown -R 1000:1000 "${job_home}/.gemini" 2>/dev/null || true
     fi
   fi
 
@@ -300,6 +387,9 @@ spawn_worker() {
   append_env_if_set AGENT_AUTH_MODE
   append_env_if_set AGENT_MODEL
   append_env_if_set AGENT_PROMPT_FILE
+  if [ -n "$job_agent_skills" ]; then
+    docker_run_args+=( -e "AGENT_SKILLS=${job_agent_skills}" )
+  fi
   append_env_if_set AGENT_TIMEOUT_SECONDS
   append_env_if_set AGENT_TOOL_OPTIONS_JSON
   append_env_if_set GIT_CLONE_DEPTH
@@ -337,6 +427,10 @@ spawn_worker() {
       docker_run_args+=( -v "${companion_base_prompt}:${companion_base_prompt}:ro" )
     fi
     docker_run_args+=( -v "${prompt_file}:${prompt_file}:ro" )
+  fi
+
+  if ! append_bind_mount_specs AGENT_SKILL_BIND_MOUNTS; then
+    return 1
   fi
 
   docker_run_args+=( "$worker_image" )
@@ -1221,7 +1315,9 @@ run_job() {
     printf '%s' "$task_messages_json" > "$task_messages_host_path"
     chmod 600 "$task_messages_host_path" 2>/dev/null || true
     if [[ "$(uname -s)" == "Linux" ]]; then
-      chown 1000:1000 "$task_messages_host_path" 2>/dev/null || true
+      # chown the entire task-input tree — mkdir creates intermediate dirs as
+      # root, but the container runs as uid 1000 and needs traverse access.
+      chown -R 1000:1000 "${job_workspace}/task-input" 2>/dev/null || true
     fi
     task_messages_file="/workspace/task-input/${task_id}/messages.json"
   fi
@@ -1268,6 +1364,16 @@ run_job() {
         exit_code=125
         ;;
     esac
+  fi
+
+  # Task failure reporting: safety net for crashes/OOM where run-task.sh
+  # could not self-report. Best-effort: errors never affect the run outcome.
+  if [ "$exit_code" -ne 0 ] && [ "$trigger_type" = "task" ] && [ -n "$task_id" ]; then
+    if report_task_failure_from_controller "$task_id" "$exit_code"; then
+      log "Task failure reported to backend: task_id=${task_id} exit_code=${exit_code}"
+    else
+      log "Task failure report to backend failed (best-effort): task_id=${task_id} exit_code=${exit_code}"
+    fi
   fi
 
   "$docker_cmd" rm -f "$container_id" >/dev/null 2>&1 || true
@@ -1620,6 +1726,21 @@ start_agent_scheduler() {
   log "Agent scheduler started: agent=${agent_id} offset=${offset}s (pid=${pid})"
 }
 
+# Send a liveness heartbeat for each configured agent. Best-effort.
+# next_run_at is approximated as now + periodic_interval; the controller loop
+# does not track exact per-agent wake times from scheduler subshells.
+fire_heartbeats() {
+  local next_run_at agent_id token_file
+  next_run_at="$(date -u -d "+${periodic_interval} seconds" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || date -u -v "+${periodic_interval}S" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || true)"
+  for agent_id in "${agent_ids[@]}"; do
+    token_file="${agent_token_files[$agent_id]:-}"
+    send_heartbeat "$agent_id" "$target_repo" "$token_file" "$next_run_at" || true
+    log "Heartbeat attempted: agent=${agent_id}"
+  done
+}
+
 run_loop_mode() {
   local agent_id=""
   local offset=""
@@ -1668,6 +1789,16 @@ run_loop_mode() {
       break
     fi
 
+    # Heartbeat: fire periodically when enabled (HEARTBEAT_INTERVAL_SECS > 0).
+    if [ "$heartbeat_interval_secs" -gt 0 ] && [ -n "${HEALTH_REPORT_URL:-}" ]; then
+      local now_epoch
+      now_epoch="$(date +%s)"
+      if [ $((now_epoch - last_heartbeat_epoch)) -ge "$heartbeat_interval_secs" ]; then
+        fire_heartbeats
+        last_heartbeat_epoch="$now_epoch"
+      fi
+    fi
+
     sleep 1 &
     wait $! || true
   done
@@ -1712,6 +1843,7 @@ orphan_recovery_grace_secs="${ORPHAN_RECOVERY_GRACE_SECS:-0}"
 queue_artifact_ttl_secs="${QUEUE_ARTIFACT_TTL_SECS:-604800}"
 workspace_ttl_secs="${WORKSPACE_TTL_SECS:-86400}"
 queue_maintenance_interval_secs="${QUEUE_MAINTENANCE_INTERVAL_SECS:-60}"
+heartbeat_interval_secs="${HEARTBEAT_INTERVAL_SECS:-1800}"
 shutdown_grace_secs="${CONTROLLER_SHUTDOWN_GRACE_SECS:-30}"
 workspace_root="${CONTROLLER_WORKSPACE_ROOT:-${WORKSPACE_ROOT:-$(pwd)/data/controller}}"
 shutdown_flag_file="${workspace_root}/shutdown.requested"
@@ -1742,6 +1874,7 @@ claimed_task_prompt=""
 claimed_task_repo=""
 claimed_task_claim_token=""
 claimed_task_messages_json=""
+last_heartbeat_epoch=0
 
 declare -a temp_token_files=()
 declare -a running_pids=()
@@ -1795,6 +1928,7 @@ require_non_negative_integer ORPHAN_RECOVERY_GRACE_SECS "$orphan_recovery_grace_
 require_non_negative_integer QUEUE_ARTIFACT_TTL_SECS "$queue_artifact_ttl_secs"
 require_non_negative_integer WORKSPACE_TTL_SECS "$workspace_ttl_secs"
 require_non_negative_integer QUEUE_MAINTENANCE_INTERVAL_SECS "$queue_maintenance_interval_secs"
+require_non_negative_integer HEARTBEAT_INTERVAL_SECS "$heartbeat_interval_secs"
 if [ "$watch_mentions" = "1" ]; then
   require_positive_integer WATCH_POLL_INTERVAL "$watch_poll_interval"
 fi
@@ -1861,6 +1995,7 @@ mkdir -p "$jobs_root" "$runs_root" "$workspaces_root" "$homes_root" "$queue_root
 chmod 700 "$workspace_root" "$jobs_root" "$runs_root" "$workspaces_root" "$homes_root" "$queue_root" "$watch_state_root" "$lock_dir" "$token_tmp_root" 2>/dev/null || true
 rm -f "$shutdown_flag_file"
 declare -A seen_agents=()
+declare -A agent_skill_lists=()
 declare -a agent_ids=()
 declare -a agent_tokens=()
 load_agent_slots "$max_agents"
