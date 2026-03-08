@@ -23,12 +23,15 @@ jobs:
           filters: |
             docker:
               - 'Dockerfile'
+              - '.dockerignore'
               - 'scripts/**'
               - 'prompts/**'
               - 'skills/**'
               - '.trivyignore'
+              - '.github/workflows/ci.yml'
             dockerfile:
               - 'Dockerfile'
+              - '.github/workflows/ci.yml'
 
   shellcheck:
     name: ShellCheck
