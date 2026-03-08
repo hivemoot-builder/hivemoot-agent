@@ -68,6 +68,7 @@ assert_contains "$run_once" "\"Bash(cat /proc/*/environ)\""
 assert_contains "$run_once" "\"Bash(* /proc/*/environ)\""
 assert_contains "$run_once" "\"Read(/proc/*/environ)\""
 # Deny list must be wired into both fresh-start and resume Claude invocations.
+# shellcheck disable=SC2016  # single quotes intentional — literal grep pattern, not expansion
 disallowed_wiring_count="$(grep -Fc 'disallowedTools "${claude_disallowed_tools' "$run_once")"
 if [ "$disallowed_wiring_count" -lt 2 ]; then
   fail "expected --disallowedTools wired in at least 2 Claude command paths, found ${disallowed_wiring_count}"
