@@ -39,14 +39,22 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: ShellCheck
+        id: shellcheck
+        continue-on-error: true
         run: shellcheck scripts/*.sh
       - name: Hadolint
+        id: hadolint
+        continue-on-error: true
         uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5  # v3.3.0
         with:
           dockerfile: Dockerfile
       - name: Compose Config
+        id: compose_config
+        continue-on-error: true
         run: docker compose -f docker-compose.yml config --quiet
       - name: Env Documentation
+        id: env_docs
+        continue-on-error: true
         run: |
           set -euo pipefail
           vars=$(grep -oP '\$\{\K[A-Z][A-Z0-9_]*' docker-compose.yml | sort -u)
@@ -60,7 +68,23 @@ jobs:
           [ "$fail" -eq 0 ] && echo "All compose variables documented in .env.example"
           exit "$fail"
       - name: Markdown Lint
+        id: markdownlint
+        continue-on-error: true
         uses: DavidAnson/markdownlint-cli2-action@05f32210e84442804257b2a6f20b273450ec8265  # v19
+      - name: Lint results
+        if: always()
+        run: |
+          failed=()
+          [ "${{ steps.shellcheck.outcome }}" = "failure" ]    && failed+=(ShellCheck)
+          [ "${{ steps.hadolint.outcome }}" = "failure" ]      && failed+=(Hadolint)
+          [ "${{ steps.compose_config.outcome }}" = "failure" ] && failed+=(ComposeConfig)
+          [ "${{ steps.env_docs.outcome }}" = "failure" ]      && failed+=("EnvDocs")
+          [ "${{ steps.markdownlint.outcome }}" = "failure" ]  && failed+=(MarkdownLint)
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::Lint checks failed: ${failed[*]}"
+            exit 1
+          fi
+          echo "All lint checks passed"
 
   script-validation:
     name: Script Validation
