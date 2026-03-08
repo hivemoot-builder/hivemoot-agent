@@ -5,6 +5,10 @@ description: >
   descriptions, scope discipline, CI monitoring, and review response
   protocol. Ensures PRs are reviewable, traceable, and move efficiently
   through the review pipeline. Works with any GitHub-hosted project.
+disallowedTools:
+  - Write
+  - Edit
+  - NotebookEdit
 ---
 
 ## Skill: PR Hygiene
