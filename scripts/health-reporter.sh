@@ -148,11 +148,11 @@ _validate_health_payload() {
 }
 
 # Send health report with retry logic for 5xx/network errors.
-# Args: url, payload, token_file
+# Args: url, payload, token (raw token or token file path)
 _send_health_report() {
   local url="$1"
   local payload="$2"
-  local token_file="$3"
+  local token_input="${3:-}"
   local max_retries="${HEALTH_REPORT_MAX_RETRIES}"
   local timeout="${HEALTH_REPORT_TIMEOUT_SECS}"
   local attempt=0
@@ -169,11 +169,17 @@ _send_health_report() {
     # process argv and does not need to be staged in a temporary file.
     local use_auth_header_stdin=0
     local token_value=""
-    if [ -n "$token_file" ] && [ -f "$token_file" ]; then
-      if ! token_value="$(tr -d '\r\n' < "$token_file")"; then
-        echo "health-report: failed to read token file: ${token_file}" >&2
-        return 1
+    if [ -n "$token_input" ]; then
+      if [ -f "$token_input" ]; then
+        if ! token_value="$(tr -d '\r\n' < "$token_input")"; then
+          echo "health-report: failed to read token file: ${token_input}" >&2
+          return 1
+        fi
+      else
+        token_value="$token_input"
       fi
+    fi
+    if [ -n "$token_value" ]; then
       use_auth_header_stdin=1
     fi
 
@@ -265,7 +271,7 @@ _sleep_with_jitter() {
 # Args:
 #   agent_id             — agent identifier (e.g. "forager")
 #   repo                 — current repo in owner/repo format
-#   token_file           — path to bearer token file (may be empty)
+#   token                — bearer token (may be empty)
 #   run_id               — unique run identifier for idempotency
 #   outcome              — "success" | "failure" | "timeout"
 #   duration_secs        — run duration in seconds
@@ -276,7 +282,7 @@ _sleep_with_jitter() {
 report_health_to_backend() {
   local agent_id="$1"
   local repo="$2"
-  local token_file="${3:-}"
+  local token="${3:-}"
   local run_id="$4"
   local outcome="$5"
   local duration_secs="$6"
@@ -316,5 +322,70 @@ report_health_to_backend() {
     return 1
   fi
 
-  _send_health_report "$HEALTH_REPORT_URL" "$payload" "$token_file"
+  _send_health_report "$HEALTH_REPORT_URL" "$payload" "$token"
+}
+
+# Send a periodic liveness heartbeat. Best-effort — never blocks the caller.
+# Bypasses _build_health_payload and _validate_health_payload entirely.
+#
+# Payload: {outcome: "heartbeat", agent_id, repo[, next_run_at]}
+# No run_id, duration_secs, or consecutive_failures — heartbeats carry
+# no run history and must not touch failure-count state on the backend.
+#
+# Args:
+#   agent_id     — agent identifier
+#   repo         — current repo in owner/repo format
+#   token_file   — path to bearer token file (may be empty)
+#   next_run_at  — ISO 8601 timestamp of agent's next scheduled run (optional)
+send_heartbeat() {
+  local agent_id="$1"
+  local repo="$2"
+  local token_file="${3:-}"
+  local next_run_at="${4:-}"
+
+  if [ -z "$HEALTH_REPORT_URL" ]; then
+    return 0
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "health-report: jq not found — skipping heartbeat for ${agent_id}" >&2
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "health-report: curl not found — skipping heartbeat for ${agent_id}" >&2
+    return 0
+  fi
+
+  local jq_args=(
+    -n
+    --arg agent_id "$agent_id"
+    --arg repo "$repo"
+    --arg outcome "heartbeat"
+  )
+
+  # shellcheck disable=SC2016  # jq placeholders must stay literal in the jq program string.
+  local jq_filter='{agent_id: $agent_id, repo: $repo, outcome: $outcome}'
+
+  if [ -n "$next_run_at" ]; then
+    jq_args+=(--arg next_run_at "$next_run_at")
+    jq_filter="${jq_filter} + {next_run_at: \$next_run_at}"
+  fi
+
+  local payload
+  payload="$(jq "${jq_args[@]}" "$jq_filter")"
+
+  local payload_size
+  payload_size="$(printf '%s' "$payload" | wc -c | tr -d ' ')"
+  if [ "$payload_size" -gt "$_HEALTH_PAYLOAD_MAX_BYTES" ]; then
+    echo "health-report: heartbeat payload too large (${payload_size} bytes) — skipping" >&2
+    return 0
+  fi
+
+  # Run in a subshell with bounded timeout/retries so a down backend cannot
+  # stall the controller loop. HEALTH_REPORT_MAX_RETRIES=0 means one attempt;
+  # HEALTH_REPORT_TIMEOUT_SECS=3 caps the curl --max-time. Both are local to
+  # the subshell so caller globals are not mutated.
+  ( HEALTH_REPORT_MAX_RETRIES=0 HEALTH_REPORT_TIMEOUT_SECS=3 \
+    _send_health_report "$HEALTH_REPORT_URL" "$payload" "$token_file" ) || true
 }

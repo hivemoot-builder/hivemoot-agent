@@ -94,6 +94,7 @@ shuffle_agents() {
 }
 
 declare -A seen_agents=()
+declare -A agent_skill_lists=()
 declare -a agent_ids=()
 declare -a agent_tokens=()
 load_agent_slots "$max_agents"
@@ -116,7 +117,7 @@ log "Randomized launch order: ${agent_ids[*]}"
 preflight_check() {
   local provider="${AGENT_PROVIDER:-claude}"
   local auth_mode="${AGENT_AUTH_MODE:-auto}"
-  local prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/default.md}"
+  local prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/system/autonomous.md}"
   local failures=0
 
   log "Pre-flight: validating configuration"
@@ -127,11 +128,24 @@ preflight_check() {
     failures=$((failures + 1))
   fi
 
-  # Prompt file exists
   if [ ! -f "$prompt_file" ]; then
     echo "Pre-flight: prompt file not found: ${prompt_file}" >&2
     failures=$((failures + 1))
+  else
+    # Built-in prompts require the shared base prompt; standalone custom
+    # prompts remain valid without a sibling base.md.
+    if ! resolve_companion_base_prompt "$prompt_file" >/dev/null; then
+      if prompt_requires_companion_base "$prompt_file"; then
+        echo "Pre-flight: base prompt file not found: $(dirname "$prompt_file")/base.md" >&2
+        failures=$((failures + 1))
+      fi
+    fi
   fi
+
+  # Skill files exist
+  local skill_failures=0
+  preflight_check_agent_skill_lists "/opt/hivemoot-agent/skills" || skill_failures=$?
+  failures=$((failures + skill_failures))
 
   # Provider auth check
   local auth_failures=0
@@ -208,6 +222,7 @@ for index in "${!agent_ids[@]}"; do
   agent_log_dir="${workspace_root}/runs/${agent_id}"
   agent_home="$(resolve_managed_agent_home "$workspace_root" "$agent_id" "$effective_auth_mode")"
   wrapper_log="${agent_log_dir}/$(date '+%Y%m%d-%H%M%S')-${agent_id}-wrapper.log"
+  agent_skills="$(resolve_agent_skill_list "$agent_id")"
 
   mkdir -p "$agent_workspace" "$agent_log_dir" "$agent_home"
   chmod 700 "$agent_workspace" "$agent_log_dir" "$agent_home" 2>/dev/null || true
@@ -241,6 +256,11 @@ for index in "${!agent_ids[@]}"; do
     export AGENT_GIT_NAME="$agent_id"
     export HIVEMOOT_BUZZ_ROLE="$agent_id"
     export AGENT_EXTRA_PROMPT="$agent_extra_prompt"
+    if [ -n "$agent_skills" ]; then
+      export AGENT_SKILLS="$agent_skills"
+    else
+      unset AGENT_SKILLS
+    fi
 
     exec /opt/hivemoot-agent/scripts/run-once.sh
   ) > "$agent_fifo" 2>&1 &

@@ -104,26 +104,57 @@ resolve_job_home() {
 load_secret_from_file() {
   local var_name="$1"
   local file_var_name="${var_name}_FILE"
+  local var_value=""
+
+  if ! var_value="$(resolve_secret_value "$var_name")"; then
+    exit 1
+  fi
+
+  if [ -z "$var_value" ]; then
+    return 0
+  fi
+
+  printf -v "$var_name" '%s' "$var_value"
+  # shellcheck disable=SC2163  # dynamic export of the variable named in $var_name
+  export "$var_name"
+  # Clear _FILE after promoting to bare var so repeated calls (e.g.
+  # run-task.sh → run-once.sh both call load_secret_from_file) don't
+  # trip resolve_secret_value's mutual-exclusion guard.
+  unset "$file_var_name"
+}
+
+# Resolve secret value without mutating env so callers can consume a secret
+# locally while still forwarding *_FILE to child processes when needed.
+resolve_secret_value() {
+  local var_name="$1"
+  local file_var_name="${var_name}_FILE"
   local var_value="${!var_name:-}"
   local file_value="${!file_var_name:-}"
 
-  if [ -n "$var_value" ] || [ -z "$file_value" ]; then
+  if [ -n "$var_value" ] && [ -n "$file_value" ]; then
+    echo "Set either ${var_name} or ${file_var_name}, not both." >&2
+    return 1
+  fi
+
+  if [ -n "$var_value" ]; then
+    printf '%s' "$var_value"
+    return 0
+  fi
+
+  if [ -z "$file_value" ]; then
     return 0
   fi
 
   if [ ! -f "$file_value" ]; then
     echo "${file_var_name} is set but file does not exist: ${file_value}" >&2
-    exit 1
+    return 1
   fi
 
-  var_value="$(tr -d '\r\n' < "$file_value")"
-  printf -v "$var_name" '%s' "$var_value"
-  # shellcheck disable=SC2163  # dynamic export of the variable named in $var_name
-  export "$var_name"
+  tr -d '\r\n' < "$file_value"
 }
 
 # Load all provider API secrets from their corresponding *_FILE env vars.
-# Called at startup in every entrypoint (entrypoint.sh, run-loop.sh,
+# Called at startup in every entrypoint (entrypoint.sh, run-loop.sh [deprecated],
 # run-multi.sh, run-once.sh) so new provider keys only need adding here.
 load_provider_secrets() {
   local secret_var
@@ -141,6 +172,88 @@ load_provider_secrets() {
   done
 }
 
+repo_name_is_valid() {
+  local repo_name="$1"
+  local repo_segment=""
+
+  if ! printf '%s' "$repo_name" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+$'; then
+    return 1
+  fi
+
+  repo_segment="${repo_name#*/}"
+  case "$repo_segment" in
+    .|..)
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+strip_frontmatter() {
+  local file="$1"
+  awk 'BEGIN{fm=0} /^---$/ && fm<2 {fm++; next} fm>=2||fm==0{print}' "$file"
+}
+
+ensure_skill_files_exist() {
+  local skills_list="$1"
+  local skills_dir="${2:-/opt/hivemoot-agent/skills}"
+  local context="${3:-AGENT_SKILLS=${skills_list}}"
+
+  [ -z "$skills_list" ] && return 0
+
+  local skill skill_file
+  while IFS= read -r skill; do
+    skill="$(trim "$skill")"
+    [ -z "$skill" ] && continue
+    case "$skill" in
+      *[!a-zA-Z0-9_-]*)
+        echo "Invalid skill name: '${skill}' (${context})" >&2
+        return 1
+        ;;
+    esac
+    skill_file="${skills_dir}/${skill}/SKILL.md"
+    if [ ! -f "$skill_file" ]; then
+      echo "Skill file not found: ${skill_file} (${context})" >&2
+      return 1
+    fi
+  done < <(tr ',' '\n' <<< "$skills_list")
+}
+
+load_skill_prompts() {
+  local skills_list="$1"
+  local skills_dir="${2:-/opt/hivemoot-agent/skills}"
+
+  [ -z "$skills_list" ] && return 0
+
+  if ! ensure_skill_files_exist "$skills_list" "$skills_dir" "AGENT_SKILLS=${skills_list}"; then
+    return 1
+  fi
+
+  local skill skill_file result="" first=1
+  while IFS= read -r skill; do
+    skill="$(trim "$skill")"
+    [ -z "$skill" ] && continue
+    skill_file="${skills_dir}/${skill}/SKILL.md"
+    local body
+    body="$(strip_frontmatter "$skill_file")"
+    if [ "$first" -eq 1 ]; then
+      result="<skill name=\"${skill}\">
+${body}
+</skill>"
+      first=0
+    else
+      result="${result}
+
+<skill name=\"${skill}\">
+${body}
+</skill>"
+    fi
+  done < <(tr ',' '\n' <<< "$skills_list")
+
+  printf '%s' "$result"
+}
+
 validate_target_repo() {
   local target_repo="$1"
 
@@ -149,7 +262,7 @@ validate_target_repo() {
     exit 1
   fi
 
-  if ! printf '%s' "$target_repo" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+  if ! repo_name_is_valid "$target_repo"; then
     echo "Invalid TARGET_REPO: ${target_repo}. Expected owner/repo." >&2
     exit 1
   fi
@@ -165,6 +278,35 @@ validate_workspace_root() {
       exit 1
       ;;
   esac
+}
+
+resolve_companion_base_prompt() {
+  local prompt_file="$1"
+  local sibling_base_file=""
+
+  sibling_base_file="$(dirname "$prompt_file")/base.md"
+  if [ "$sibling_base_file" = "$prompt_file" ]; then
+    return 1
+  fi
+
+  if [ -f "$sibling_base_file" ]; then
+    printf '%s' "$sibling_base_file"
+    return 0
+  fi
+
+  return 1
+}
+
+prompt_requires_companion_base() {
+  local prompt_file="$1"
+
+  case "$prompt_file" in
+    /opt/hivemoot-agent/prompts/system/autonomous.md|/opt/hivemoot-agent/prompts/system/task.md)
+      return 0
+      ;;
+  esac
+
+  return 1
 }
 
 validate_agent_id() {
@@ -241,33 +383,49 @@ load_slot_token() {
   printf '%s' "$token"
 }
 
+load_slot_skills() {
+  local suffix="$1"
+  local skills_var="AGENT_SKILLS_${suffix}"
+  printf '%s' "$(trim "${!skills_var:-}")"
+}
+
 # Populate caller-declared seen_agents, agent_ids, and agent_tokens by reading
 # AGENT_ID_XX / AGENT_GITHUB_TOKEN_XX(_FILE) env vars for slots 1..<max_slots>.
+# If the caller declares agent_skill_lists as an associative array, populate it
+# from optional AGENT_SKILLS_XX values for matching slots.
 # Arrays must be declared in the caller scope before calling this function:
 #   declare -A seen_agents=()
 #   declare -a agent_ids=()
 #   declare -a agent_tokens=()
+#   declare -A agent_skill_lists=()
 load_agent_slots() {
   local max_slots="${1:-10}"
-  local slot suffix id_var token_var token_file_var
-  local agent_id agent_token token_inline token_file
+  local slot suffix id_var token_var token_file_var skills_var
+  local agent_id agent_token token_inline token_file agent_skill_list
+  local populate_skill_lists=0
+
+  if declare -p agent_skill_lists >/dev/null 2>&1; then
+    populate_skill_lists=1
+  fi
 
   for slot in $(seq 1 "$max_slots"); do
     suffix="$(printf '%02d' "$slot")"
     id_var="AGENT_ID_${suffix}"
     token_var="AGENT_GITHUB_TOKEN_${suffix}"
     token_file_var="${token_var}_FILE"
+    skills_var="AGENT_SKILLS_${suffix}"
 
     agent_id="$(trim "${!id_var:-}")"
     token_inline="${!token_var:-}"
     token_file="${!token_file_var:-}"
+    agent_skill_list="$(load_slot_skills "$suffix")"
 
-    if [ -z "$agent_id" ] && [ -z "$token_inline" ] && [ -z "$token_file" ]; then
+    if [ -z "$agent_id" ] && [ -z "$token_inline" ] && [ -z "$token_file" ] && [ -z "$agent_skill_list" ]; then
       continue
     fi
 
     if [ -z "$agent_id" ]; then
-      echo "${id_var} is required when ${token_var} or ${token_file_var} is set." >&2
+      echo "${id_var} is required when ${token_var}, ${token_file_var}, or ${skills_var} is set." >&2
       exit 1
     fi
 
@@ -287,12 +445,51 @@ load_agent_slots() {
 
     agent_ids+=("$agent_id")
     agent_tokens+=("$agent_token")
+    if [ "$populate_skill_lists" -eq 1 ] && [ -n "$agent_skill_list" ]; then
+      agent_skill_lists["$agent_id"]="$agent_skill_list"
+    fi
   done
 
   if [ "${#agent_ids[@]}" -eq 0 ]; then
     echo "No agents configured. Set AGENT_ID_01 + AGENT_GITHUB_TOKEN_01 (up to _10)." >&2
     exit 1
   fi
+}
+
+resolve_agent_skill_list() {
+  local agent_id="$1"
+  local fallback="${2:-${AGENT_SKILLS:-}}"
+
+  if declare -p agent_skill_lists >/dev/null 2>&1; then
+    if [ "${agent_skill_lists[$agent_id]+_}" = "_" ]; then
+      printf '%s' "${agent_skill_lists[$agent_id]}"
+      return 0
+    fi
+  fi
+
+  printf '%s' "$fallback"
+}
+
+preflight_check_agent_skill_lists() {
+  local skills_dir="${1:-/opt/hivemoot-agent/skills}"
+  local agent_id=""
+  local skills_list=""
+  local failures=0
+  declare -A checked_skill_lists=()
+
+  for agent_id in "${agent_ids[@]}"; do
+    skills_list="$(resolve_agent_skill_list "$agent_id")"
+    [ -z "$skills_list" ] && continue
+    if [ -n "${checked_skill_lists[$skills_list]:-}" ]; then
+      continue
+    fi
+    checked_skill_lists["$skills_list"]=1
+    if ! ensure_skill_files_exist "$skills_list" "$skills_dir" "AGENT_SKILLS(${agent_id})=${skills_list}"; then
+      failures=$((failures + 1))
+    fi
+  done
+
+  return "$failures"
 }
 
 preflight_check_provider_auth() {
@@ -529,78 +726,4 @@ init_agent_home() {
   # shellcheck disable=SC2016  # literal ${PATH} intended for .profile
   printf 'export PATH="/usr/local/share/npm-global/bin:${PATH}"\n' \
     > "$agent_home/.profile"
-}
-
-# Append a structured JSON event to an NDJSON events file.
-# Each call emits one JSON object per line (newline-delimited JSON).
-# Usage: log_event <events_file> <event_name> <agent_id> <run_id> <event_seq> [extra_fields]
-# extra_fields: raw JSON field list (no outer braces), e.g. '"duration_secs":42,"outcome":"success"'
-log_event() {
-  local events_file="$1"
-  local event_name="$2"
-  local agent_id="$3"
-  local run_id="$4"
-  local event_seq="$5"
-  local extra="${6:-}"
-  local ts
-  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  if [ -n "$extra" ]; then
-    printf '{"event":"%s","agent_id":"%s","run_id":"%s","event_seq":%d,"timestamp":"%s",%s}\n' \
-      "$event_name" "$agent_id" "$run_id" "$event_seq" "$ts" "$extra" >> "$events_file"
-  else
-    printf '{"event":"%s","agent_id":"%s","run_id":"%s","event_seq":%d,"timestamp":"%s"}\n' \
-      "$event_name" "$agent_id" "$run_id" "$event_seq" "$ts" >> "$events_file"
-  fi
-}
-
-# Write an agent health snapshot atomically via temp-file + mv.
-# Readers never observe a partial write. Overwrites the previous snapshot.
-# Usage: write_health_snapshot <health_file> <agent_id> <run_id> <last_event> <consecutive_failures>
-write_health_snapshot() {
-  local health_file="$1"
-  local agent_id="$2"
-  local run_id="$3"
-  local last_event="$4"
-  local consecutive_failures="${5:-0}"
-  local ts
-  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  local tmp_file="${health_file}.tmp.$$"
-  printf '{"agent_id":"%s","run_id":"%s","last_event":"%s","consecutive_failures":%d,"updated_at":"%s"}\n' \
-    "$agent_id" "$run_id" "$last_event" "$consecutive_failures" "$ts" > "$tmp_file"
-  mv "$tmp_file" "$health_file"
-}
-
-# Atomically increment persistent agent run/error counters.
-# Uses the same temp+mv pattern as write_health_snapshot.
-# Prints "run_count\terror_count" after the increment so callers can
-# capture the updated values without a second read.
-# Usage: update_agent_stats <stats_file> <is_error>
-#   is_error: 1 if the run failed, 0 otherwise
-update_agent_stats() {
-  local stats_file="$1"
-  local is_error="${2:-0}"
-  local run_count=0
-  local error_count=0
-  local ts
-
-  if [ -f "$stats_file" ] && command -v jq >/dev/null 2>&1; then
-    run_count="$(jq -r '.run_count // 0' "$stats_file" 2>/dev/null || printf '0')"
-    error_count="$(jq -r '.error_count // 0' "$stats_file" 2>/dev/null || printf '0')"
-  fi
-
-  run_count=$((run_count + 1))
-  if [ "$is_error" -eq 1 ]; then
-    error_count=$((error_count + 1))
-  fi
-
-  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  local stats_dir
-  stats_dir="$(dirname "$stats_file")"
-  mkdir -p "$stats_dir"
-  local tmp_file="${stats_file}.tmp.$$"
-  printf '{"run_count":%d,"error_count":%d,"updated_at":"%s"}\n' \
-    "$run_count" "$error_count" "$ts" > "$tmp_file"
-  mv "$tmp_file" "$stats_file"
-
-  printf '%d\t%d' "$run_count" "$error_count"
 }

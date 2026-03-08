@@ -96,8 +96,11 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
+# shellcheck source=scripts/lib-observability.sh
+. "${SCRIPT_DIR}/lib-observability.sh"
 
 load_secret_from_file AGENT_GITHUB_TOKEN
+load_secret_from_file HIVEMOOT_AGENT_TOKEN
 load_provider_secrets
 
 # shellcheck source=scripts/opencode-helpers.sh
@@ -259,7 +262,8 @@ hivemoot_buzz_role="${HIVEMOOT_BUZZ_ROLE:-}"
 target_repo="${TARGET_REPO:-}"
 workspace_root="${WORKSPACE_ROOT:-/workspace}"
 clone_depth="${GIT_CLONE_DEPTH:-50}"
-prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/default.md}"
+prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/system/autonomous.md}"
+agent_skills="${AGENT_SKILLS:-}"
 extra_prompt="${AGENT_EXTRA_PROMPT:-}"
 agent_model="${AGENT_MODEL:-}"
 agent_tool_options_json="${AGENT_TOOL_OPTIONS_JSON:-"{}"}"
@@ -444,10 +448,23 @@ if [ ! -f "$prompt_file" ]; then
   exit 1
 fi
 
-# Build system instructions (base prompt + role) separately from task context
-# (extra_prompt). Claude uses --append-system-prompt for the former and the
-# user message for the latter; other providers concatenate everything.
+base_prompt_file=""
+if base_prompt_file="$(resolve_companion_base_prompt "$prompt_file")"; then
+  :
+elif prompt_requires_companion_base "$prompt_file"; then
+  echo "Base prompt file not found: $(dirname "$prompt_file")/base.md" >&2
+  exit 1
+fi
+
+# Build system instructions separately from task context (extra_prompt). When
+# a companion base prompt exists, prepend it to the mode-specific prompt;
+# standalone custom prompts continue to work as a complete system prompt.
 system_prompt="$(cat "$prompt_file")"
+if [ -n "$base_prompt_file" ]; then
+  system_prompt="$(cat "$base_prompt_file")
+
+$(cat "$prompt_file")"
+fi
 if [ -n "$hivemoot_buzz_role" ]; then
   role_prompt_block=""
   if ! role_prompt_block="$(resolve_role_prompt_block "$hivemoot_buzz_role" "$target_repo")"; then
@@ -469,6 +486,21 @@ else
 Target repository: ${target_repo}
 Local repository path: ${repo_dir}
 "
+fi
+
+# Skill modules: capability blocks appended after the role context.
+if [ -n "$agent_skills" ]; then
+  skills_content=""
+  if ! skills_content="$(load_skill_prompts "$agent_skills" "/opt/hivemoot-agent/skills")"; then
+    exit 1
+  fi
+  if [ -n "$skills_content" ]; then
+    system_prompt="${system_prompt}
+
+<skills>
+${skills_content}
+</skills>"
+  fi
 fi
 
 # Technical notes block: runtime details agents should be aware of.
@@ -681,6 +713,15 @@ case "$provider" in
       codex_cmd_common+=(--config "model_reasoning_effort=\"${codex_reasoning_effort}\"")
       log "Codex reasoning effort: ${codex_reasoning_effort}"
     fi
+    # In task mode, request a native answer sidecar via --output-last-message.
+    # run-task.sh sets CODEX_ANSWER_FILE to the expected path before invoking
+    # this script. The sidecar is written atomically at turn end and is more
+    # reliable than JSONL log parsing.
+    if [ -n "${CODEX_ANSWER_FILE:-}" ]; then
+      mkdir -p "$(dirname "$CODEX_ANSWER_FILE")"
+      codex_cmd_common+=(--output-last-message "$CODEX_ANSWER_FILE")
+      log "Codex output-last-message: ${CODEX_ANSWER_FILE}"
+    fi
     codex_fresh_cmd=(codex exec "${codex_cmd_common[@]}" "$prompt")
 
     if [ "$session_resume" = "1" ] && [ -n "$session_resume_key" ]; then
@@ -764,7 +805,14 @@ You are resuming a prior session for this mention thread. Some data in your cont
     fi
     log "Gemini auth mode resolved to: ${gemini_auth_mode}"
 
-    cmd=(gemini --yolo --output-format stream-json -p "$prompt")
+    # In task mode, use text output format so the log IS the answer text and
+    # no log parsing is required. Keep stream-json for non-task runs where
+    # structured events are useful for telemetry and session diagnostics.
+    if [ -n "${AGENT_TASK_ID:-}" ]; then
+      cmd=(gemini --yolo --output-format text -p "$prompt")
+    else
+      cmd=(gemini --yolo --output-format stream-json -p "$prompt")
+    fi
     if [ -n "$agent_model" ]; then
       cmd+=(-m "$agent_model")
     fi
@@ -803,7 +851,38 @@ You are resuming a prior session for this mention thread. Some data in your cont
     fi
     log "Claude auth mode resolved to: ${claude_auth_mode}"
 
-    claude_fresh_cmd=(claude -p --verbose --output-format stream-json --dangerously-skip-permissions)
+    # Deny rules are enforced even with --dangerously-skip-permissions;
+    # they block naive single-command exfiltration patterns from prompt injection.
+    # See issue #94 for analysis and rationale.
+    # Note: Bash(*) access means sufficiently creative shell invocations
+    # (e.g. bash -c 'env', python3 -c 'import os; print(os.environ)') cannot
+    # be blocked by deny lists alone — container isolation is the primary defense.
+    claude_disallowed_tools=(
+      "Bash(env)"
+      "Bash(env *)"
+      "Bash(printenv)"
+      "Bash(printenv *)"
+      "Bash(set)"
+      "Bash(set *)"
+      "Bash(export)"
+      "Bash(export *)"
+      "Bash(declare)"
+      "Bash(declare *)"
+      "Bash(cat /run/secrets/*)"
+      "Bash(* /run/secrets/*)"
+      "Read(/run/secrets/*)"
+    )
+
+    # In task mode, use text output format so the log IS the answer text.
+    # Remove --verbose to keep stdout clean (verbose lines would pollute the
+    # extracted result). Keep stream-json + verbose for non-task runs where
+    # structured events enable session resume and telemetry.
+    if [ -n "${AGENT_TASK_ID:-}" ]; then
+      claude_fresh_cmd=(claude -p --output-format text --dangerously-skip-permissions)
+    else
+      claude_fresh_cmd=(claude -p --verbose --output-format stream-json --dangerously-skip-permissions)
+    fi
+    claude_fresh_cmd+=(--disallowedTools "${claude_disallowed_tools[@]}")
     claude_fresh_cmd+=(--append-system-prompt "$system_prompt")
     if [ -n "$agent_model" ]; then
       claude_fresh_cmd+=(--model "$agent_model")
@@ -852,7 +931,12 @@ You are resuming a prior session for this mention thread. Some data in your cont
       claude_resume_user_message="${user_message}
 
 You are resuming a prior session for this mention thread. Some data in your context may be stale — refresh the relevant information before acting."
-      cmd=(claude --resume "$claude_active_session_id" -p --verbose --output-format stream-json --dangerously-skip-permissions)
+      if [ -n "${AGENT_TASK_ID:-}" ]; then
+        cmd=(claude --resume "$claude_active_session_id" -p --output-format text --dangerously-skip-permissions)
+      else
+        cmd=(claude --resume "$claude_active_session_id" -p --verbose --output-format stream-json --dangerously-skip-permissions)
+      fi
+      cmd+=(--disallowedTools "${claude_disallowed_tools[@]}")
       cmd+=(--append-system-prompt "$system_prompt")
       if [ -n "$agent_model" ]; then
         cmd+=(--model "$agent_model")
@@ -1110,6 +1194,11 @@ if [ -n "${HEALTH_REPORT_URL:-}" ]; then
 
   # Compute next_run_at when running on a periodic schedule.
   # PERIODIC_INTERVAL_SECS is exported by run-loop.sh; unset for standalone/mention runs.
+  # This is a nominal floor (now + interval), not a hard guarantee. On failure,
+  # run-loop.sh applies exponential backoff that can defer the actual next run
+  # beyond this timestamp. Dashboards should treat this as best-effort and avoid
+  # tight "overdue" thresholds — a run landing later than next_run_at is not
+  # necessarily late, especially when PERIODIC_INTERVAL_SECS < backoff minimums.
   _next_run_at=""
   if [ -n "${PERIODIC_INTERVAL_SECS:-}" ] && printf '%s' "$PERIODIC_INTERVAL_SECS" | grep -Eq '^[1-9][0-9]*$'; then
     _next_run_at="$(date -u -d "+${PERIODIC_INTERVAL_SECS} seconds" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
@@ -1118,7 +1207,7 @@ if [ -n "${HEALTH_REPORT_URL:-}" ]; then
   fi
 
   report_health_to_backend \
-    "$agent_name" "$target_repo" "${HEALTH_REPORT_TOKEN_FILE:-${AGENT_GITHUB_TOKEN_FILE:-}}" \
+    "$agent_name" "$target_repo" "${HIVEMOOT_AGENT_TOKEN:-}" \
     "$run_id" "$_run_outcome" "$run_duration_secs" "${_consecutive_failures:-0}" \
     "$exit_code" "${_run_error:-}" "$_next_run_at" || true
 fi

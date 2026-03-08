@@ -101,6 +101,7 @@ validate_target_repo "$target_repo"
 # ── Agent Slot Parsing ─────────────────────────────────────────────
 
 declare -A seen_agents=()
+declare -A agent_skill_lists=()
 declare -a agent_ids=()
 declare -a agent_tokens=()
 load_agent_slots "$max_agents"
@@ -137,7 +138,7 @@ preflight_check() {
 
   local provider="${AGENT_PROVIDER:-claude}"
   local auth_mode="${AGENT_AUTH_MODE:-auto}"
-  local prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/default.md}"
+  local prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/system/autonomous.md}"
 
   if ! command -v "$provider" >/dev/null 2>&1; then
     echo "Pre-flight: ${provider} CLI is not installed." >&2
@@ -152,7 +153,19 @@ preflight_check() {
   if [ ! -f "$prompt_file" ]; then
     echo "Pre-flight: prompt file not found: ${prompt_file}" >&2
     failures=$((failures + 1))
+  else
+    if ! resolve_companion_base_prompt "$prompt_file" >/dev/null; then
+      if prompt_requires_companion_base "$prompt_file"; then
+        echo "Pre-flight: base prompt file not found: $(dirname "$prompt_file")/base.md" >&2
+        failures=$((failures + 1))
+      fi
+    fi
   fi
+
+  # Skill files exist
+  local skill_failures=0
+  preflight_check_agent_skill_lists "/opt/hivemoot-agent/skills" || skill_failures=$?
+  failures=$((failures + skill_failures))
 
   # Provider auth check
   local auth_failures=0
@@ -265,8 +278,10 @@ try_run_agent() {
   local agent_repo="${agent_workspace}/repo"
   local agent_log_dir="${workspace_root}/runs/${agent_id}"
   local agent_home=""
+  local resolved_agent_skills=""
 
   agent_home="$(resolve_managed_agent_home "$workspace_root" "$agent_id" "$effective_auth_mode")"
+  resolved_agent_skills="$(resolve_agent_skill_list "$agent_id")"
 
   mkdir -p "$agent_workspace" "$agent_log_dir" "$agent_home"
 
@@ -285,6 +300,11 @@ try_run_agent() {
     export AGENT_EXTRA_PROMPT="$extra_prompt"
     export AGENT_SESSION_KEY="$session_key"
     export AGENT_CONSECUTIVE_FAILURES="$consecutive_failures_count"
+    if [ -n "$resolved_agent_skills" ]; then
+      export AGENT_SKILLS="$resolved_agent_skills"
+    else
+      unset AGENT_SKILLS
+    fi
     # Keep next_run_at scoped to periodic scheduler runs only.
     if [ "$run_trigger" = "periodic" ]; then
       export PERIODIC_INTERVAL_SECS="$periodic_interval"
