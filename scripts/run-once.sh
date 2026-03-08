@@ -871,6 +871,9 @@ You are resuming a prior session for this mention thread. Some data in your cont
       "Bash(cat /run/secrets/*)"
       "Bash(* /run/secrets/*)"
       "Read(/run/secrets/*)"
+      "Bash(cat /proc/*/environ)"
+      "Bash(* /proc/*/environ)"
+      "Read(/proc/*/environ)"
     )
 
     # In task mode, use text output format so the log IS the answer text.

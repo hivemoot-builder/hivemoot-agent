@@ -55,6 +55,9 @@ assert_contains "$run_once" "claude_fresh_cmd+=(--disallowedTools \"\${claude_di
 assert_contains "$run_once" "cmd+=(--disallowedTools \"\${claude_disallowed_tools[@]}\")"
 assert_contains "$run_once" "\"Bash(env)\""
 assert_contains "$run_once" "\"Read(/run/secrets/*)\""
+assert_contains "$run_once" "\"Bash(cat /proc/*/environ)\""
+assert_contains "$run_once" "\"Bash(* /proc/*/environ)\""
+assert_contains "$run_once" "\"Read(/proc/*/environ)\""
 
 prompt_arg_count="$(grep -Fc "cmd+=(\"\$prompt\")" "$run_once")"
 if [ "$prompt_arg_count" -lt 2 ]; then
