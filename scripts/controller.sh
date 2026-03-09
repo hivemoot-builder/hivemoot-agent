@@ -630,7 +630,7 @@ enqueue_watch_event() {
   fi
 
   if queue_has_ack_key "$ack_key"; then
-    log "${agent_id}: duplicate event suppressed (reason=${reason} ack_key=${ack_key})"
+    log "${agent_id}: duplicate ${reason} suppressed (ack_key=${ack_key})"
     return 0
   fi
 
