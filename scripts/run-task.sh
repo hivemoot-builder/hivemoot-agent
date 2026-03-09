@@ -288,9 +288,10 @@ if build_execute_url >/dev/null && [ -z "$task_claim_token" ]; then
   exit 1
 fi
 
-result_path="${workspace_root}/task-output/${task_id}/result.md"
-
+validate_task_id "$task_id"
 validate_target_repo "$task_repo"
+
+result_path="${workspace_root}/task-output/${task_id}/result.md"
 
 # Task mode always starts fresh context to avoid cross-task bleed.
 export SESSION_RESUME=0
@@ -301,6 +302,9 @@ unset AGENT_SESSION_KEY || true
 # for dispatch-only agents like "attendant" that have no entry in the repo's
 # hivemoot.yml.  Clear the role so run-once.sh skips role resolution.
 unset HIVEMOOT_BUZZ_ROLE || true
+
+# Mark this run as task-triggered for health reporting.
+export RUN_TRIGGER_TYPE="${RUN_TRIGGER_TYPE:-task}"
 
 # Task mode uses a focused system prompt by default, but preserves an explicit
 # AGENT_PROMPT_FILE override for operators who provide their own system prompt.

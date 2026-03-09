@@ -363,6 +363,11 @@ spawn_worker() {
     -e HIVEMOOT_CLI_UPDATE=skip
   )
 
+  # Map internal trigger_type to the health report enum value.
+  local rtt="$trigger_type"
+  [ "$rtt" = "periodic" ] && rtt="scheduled"
+  docker_run_args+=( -e "RUN_TRIGGER_TYPE=${rtt}" )
+
   if [ -n "$extra_prompt" ]; then
     docker_run_args+=( -e "AGENT_EXTRA_PROMPT=${extra_prompt}" )
   fi
@@ -1577,6 +1582,10 @@ claim_next_task() {
 
   if [ -z "$claimed_task_id" ] || [ -z "$claimed_task_prompt" ] || [ -z "$claimed_task_repo" ] || [ -z "$claimed_task_claim_token" ]; then
     log "Claimed task missing required fields (task_id/prompt/repo/claim_token)"
+    return 2
+  fi
+  if ! task_id_is_valid "$claimed_task_id"; then
+    log "Claimed task_id has invalid format: ${claimed_task_id}"
     return 2
   fi
   if ! repo_name_is_valid "$claimed_task_repo"; then
