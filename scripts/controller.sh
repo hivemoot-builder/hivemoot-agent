@@ -860,12 +860,21 @@ start_review_request_watchers() {
 
 stop_watchers() {
   local pid=""
+  local deadline=0
 
   for pid in "${watcher_pids[@]}"; do
     kill -TERM "$pid" 2>/dev/null || true
   done
 
+  deadline=$((SECONDS + shutdown_grace_secs))
   for pid in "${watcher_pids[@]}"; do
+    while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      log "WARNING: watcher subshell ${pid} did not exit after TERM; sending KILL"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
     wait "$pid" 2>/dev/null || true
   done
 
@@ -1228,12 +1237,21 @@ cleanup_temp_tokens() {
 
 stop_schedulers() {
   local pid=""
+  local deadline=0
 
   for pid in "${scheduler_pids[@]}"; do
     kill -TERM "$pid" 2>/dev/null || true
   done
 
+  deadline=$((SECONDS + shutdown_grace_secs))
   for pid in "${scheduler_pids[@]}"; do
+    while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      log "WARNING: scheduler subshell ${pid} did not exit after TERM; sending KILL"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
     wait "$pid" 2>/dev/null || true
   done
 
@@ -1256,6 +1274,7 @@ handle_shutdown() {
 
 stop_job_subshells() {
   local pid=""
+  local deadline=0
 
   if [ "${#running_pids[@]}" -gt 0 ]; then
     log "Stopping ${#running_pids[@]} tracked job subshell(s)"
@@ -1265,7 +1284,21 @@ stop_job_subshells() {
     kill -TERM "$pid" 2>/dev/null || true
   done
 
+  # Wait up to shutdown_grace_secs for subshells to exit, then KILL-escalate.
+  # Note: job subshells block on `docker wait <container>` (run_job:1313). If
+  # stop_controller_workers fails to stop a container, docker wait never returns
+  # and the subshell won't exit before KILL. After KILL, the orphaned docker wait
+  # grandchild is reparented to init and exits once stop_controller_workers
+  # eventually terminates that container.
+  deadline=$((SECONDS + shutdown_grace_secs))
   for pid in "${running_pids[@]}"; do
+    while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      log "WARNING: job subshell ${pid} did not exit after TERM; sending KILL"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
     wait "$pid" 2>/dev/null || true
   done
 
