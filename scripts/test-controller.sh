@@ -1808,7 +1808,6 @@ run_sigkill_escalation_unit_case() {
   # Without this, a race where SIGTERM arrives before `trap '' TERM` executes
   # would let bash use its default SIGTERM handler and exit immediately.
   # /proc/<pid>/status SigIgn bit 14 (0x4000) corresponds to SIGTERM (signal 15).
-  local sig_ign_term_hex="4000"
   local sig_ready_deadline=$((SECONDS + 3))
   while [ "$SECONDS" -lt "$sig_ready_deadline" ]; do
     local sig_ign
