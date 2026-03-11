@@ -1781,6 +1781,74 @@ run_exit_trap_reaps_job_subshells_case() {
   echo "PASS: EXIT trap cleanup reaps tracked job subshells (controller_exit=${controller_status})"
 }
 
+run_sigkill_escalation_unit_case() {
+  # Unit test for the TERM → wait(grace) → KILL escalation pattern used by
+  # stop_job_subshells, stop_watchers, and stop_schedulers.
+  #
+  # Background: bash job subshells exit immediately on SIGTERM by default
+  # (the signal interrupts waitpid() and bash terminates).  In production the
+  # SIGKILL branch is a safety net for cases where a subshell is in an
+  # uninterruptible wait or has explicitly trapped SIGTERM.  Testing that path
+  # through the full controller flow is not feasible without modifying
+  # production code, so this case tests the escalation logic directly with a
+  # SIGTERM-resistant process.
+  local case_dir="$1"
+  local resistant_pid=0
+  local deadline=0
+  local killed_by_kill=0
+
+  mkdir -p "$case_dir"
+
+  # Create a SIGTERM-resistant bash subshell — same pattern as a process with
+  # SIGTERM trapped to SIG_IGN.  This forces the KILL path to fire.
+  ( trap '' TERM; while true; do sleep 0.05; done ) &
+  resistant_pid=$!
+
+  # Wait until the subshell has set its trap (SIG_IGN for SIGTERM).
+  # Without this, a race where SIGTERM arrives before `trap '' TERM` executes
+  # would let bash use its default SIGTERM handler and exit immediately.
+  # /proc/<pid>/status SigIgn bit 14 (0x4000) corresponds to SIGTERM (signal 15).
+  local sig_ign_term_hex="4000"
+  local sig_ready_deadline=$((SECONDS + 3))
+  while [ "$SECONDS" -lt "$sig_ready_deadline" ]; do
+    local sig_ign
+    sig_ign="$(grep SigIgn "/proc/${resistant_pid}/status" 2>/dev/null | awk '{print $2}' || echo "")"
+    # SigIgn is a 16-digit hex bitmask; bit for SIGTERM (15) is 0x4000
+    # Use arithmetic to test the bit: 16#<hex> & 0x4000
+    if [ -n "$sig_ign" ] && [ $(( 16#${sig_ign} & 0x4000 )) -ne 0 ]; then
+      break
+    fi
+    sleep 0.02
+  done
+
+  # TERM phase: send SIGTERM as the escalation does.
+  kill -TERM "$resistant_pid" 2>/dev/null || true
+
+  # Poll with a 1s grace window (mirrors CONTROLLER_SHUTDOWN_GRACE_SECS=1).
+  local grace_secs=1
+  deadline=$((SECONDS + grace_secs))
+  while kill -0 "$resistant_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 0.05
+  done
+
+  # KILL phase: if still alive, send SIGKILL.
+  if kill -0 "$resistant_pid" 2>/dev/null; then
+    killed_by_kill=1
+    kill -KILL "$resistant_pid" 2>/dev/null || true
+  fi
+
+  wait "$resistant_pid" 2>/dev/null || true
+
+  assert_eq "1" "$killed_by_kill" \
+    "escalation must send SIGKILL when process does not exit after SIGTERM + grace period"
+
+  # Verify the process is fully reaped after SIGKILL.
+  kill -0 "$resistant_pid" 2>/dev/null \
+    && fail "resistant process still alive after SIGKILL + wait"
+
+  echo "PASS: TERM→wait(grace)→KILL escalation fires and reaps SIGTERM-resistant processes"
+}
+
 run_same_agent_concurrent_case() {
   local repo_root="$1"
   local case_dir="$2"
@@ -2019,6 +2087,7 @@ run_workspace_ttl_disabled_case "$repo_root" "${tmpdir}/workspace-ttl-disabled"
 run_workspace_prune_failure_reporting_case "$repo_root" "${tmpdir}/workspace-prune-failure-reporting"
 run_shutdown_signal_case "$repo_root" "${tmpdir}/shutdown"
 run_exit_trap_reaps_job_subshells_case "$repo_root" "${tmpdir}/exit-trap-reap"
+run_sigkill_escalation_unit_case "${tmpdir}/sigkill-escalation-unit"
 run_same_agent_concurrent_case "$repo_root" "${tmpdir}/same-agent-concurrent"
 run_periodic_deferral_cleanup_case "$repo_root" "${tmpdir}/periodic-deferral-cleanup"
 run_task_failure_report_case "$repo_root" "${tmpdir}/task-failure-report"
