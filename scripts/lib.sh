@@ -695,3 +695,195 @@ cleanup_temp_tokens() {
     rm -f "$path" 2>/dev/null || true
   done
 }
+
+# Inject one plugin's MCP config fragment into the provider's config file.
+# Skips silently when no fragment exists for the given provider.
+# Fails closed: invalid JSON in fragment or config is fatal.
+#
+# Supported providers and their config paths / merge keys:
+#   claude    ~/.claude.json             mcpServers (JSON object)
+#   gemini    ~/.gemini/settings.json   mcpServers (JSON object)
+#   opencode  ~/.config/opencode/config.json  mcp (JSON object)
+#   kilo      ~/.config/kilo/kilo.json  mcp (JSON object)
+#   codex     ~/.codex/config.toml      [mcp_servers.*] (TOML append)
+inject_plugin_mcp_config() {
+  local plugin_dir="$1"
+  local provider="$2"
+  local agent_home="$3"
+  local fragment_file config_file merge_key
+
+  case "$provider" in
+    claude)
+      fragment_file="${plugin_dir}/mcp/claude.json"
+      config_file="${agent_home}/.claude.json"
+      merge_key="mcpServers"
+      ;;
+    gemini)
+      fragment_file="${plugin_dir}/mcp/gemini.json"
+      config_file="${agent_home}/.gemini/settings.json"
+      merge_key="mcpServers"
+      ;;
+    opencode)
+      fragment_file="${plugin_dir}/mcp/opencode.json"
+      config_file="${agent_home}/.config/opencode/config.json"
+      merge_key="mcp"
+      ;;
+    kilo)
+      fragment_file="${plugin_dir}/mcp/kilo.json"
+      config_file="${agent_home}/.config/kilo/kilo.json"
+      merge_key="mcp"
+      ;;
+    codex)
+      fragment_file="${plugin_dir}/mcp/codex.toml"
+      config_file="${agent_home}/.codex/config.toml"
+      ;;
+    *)
+      # Unknown provider; skip silently — plugins need not support all providers.
+      return 0
+      ;;
+  esac
+
+  # No fragment for this provider; skip silently.
+  if [ ! -f "$fragment_file" ]; then
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$config_file")"
+
+  if [ "$provider" = "codex" ]; then
+    # Structural validation: all section headers must be [mcp_servers.<name>].
+    # Reject any non-mcp_servers section headers — prevents arbitrary TOML injection.
+    local bad_headers
+    bad_headers="$(grep -E '^\[' "$fragment_file" | grep -vE '^\[mcp_servers\.[A-Za-z0-9_-]+\]$' || true)"
+    if [ -n "$bad_headers" ]; then
+      printf 'Codex fragment %s contains non-mcp_servers sections\n' "$fragment_file" >&2
+      return 1
+    fi
+
+    # Reject top-level keys that appear before the first [mcp_servers.*] section.
+    local top_level_keys
+    top_level_keys="$(awk '/^\[mcp_servers\./ {exit} /^[^#[:space:]]/ {print}' "$fragment_file")"
+    if [ -n "$top_level_keys" ]; then
+      printf 'Codex fragment %s contains top-level keys outside [mcp_servers.*] sections\n' "$fragment_file" >&2
+      return 1
+    fi
+
+    # Value-level validation: key=value lines must use recognized TOML value types.
+    # This catches common mistakes like `command = node` (unquoted string) which would
+    # corrupt the Codex config on startup.
+    # Accepted types: quoted strings ("), literal strings ('), arrays ([), inline
+    # tables ({), integers/floats (digit or sign+digit), booleans (true/false),
+    # and TOML specials (inf, nan).
+    # Lines without '=' (empty, comments, section headers, array continuations) are
+    # skipped so multi-line arrays remain valid.
+    local kv_line kv_val
+    while IFS= read -r kv_line; do
+      case "$kv_line" in
+        ''|'#'*|'['*) continue ;;
+      esac
+      # Only inspect lines that look like key = value
+      case "$kv_line" in
+        *'='*)
+          kv_val="${kv_line#*=}"
+          # Strip leading whitespace (tabs and spaces)
+          while [ "${kv_val}" != "${kv_val# }" ]; do kv_val="${kv_val# }"; done
+          while [ "${kv_val}" != "${kv_val#	}" ]; do kv_val="${kv_val#	}"; done
+          case "$kv_val" in
+            '"'*|"'"*|'['*|'{'*|[0-9]*|[+-][0-9]*|true*|false*|inf*|nan*) ;;
+            *)
+              printf 'Codex fragment %s: invalid TOML value (unquoted string?) in line: %s\n' \
+                "$fragment_file" "$kv_line" >&2
+              return 1
+              ;;
+          esac
+          ;;
+      esac
+    done < "$fragment_file"
+
+    # TOML: grep-check-then-append for idempotency.
+    # If the first [mcp_servers.*] section header from the fragment already
+    # exists in the config, the plugin was already injected — skip.
+    local first_header
+    first_header="$(grep -m1 -E '^\[mcp_servers\.' "$fragment_file" 2>/dev/null || true)"
+    if [ -n "$first_header" ] && [ -f "$config_file" ] && \
+       grep -qF "$first_header" "$config_file" 2>/dev/null; then
+      return 0
+    fi
+
+    # Ensure a newline separator when appending to a file that lacks a trailing newline.
+    # A missing trailing newline concatenates the last line with the new section header,
+    # producing invalid TOML (e.g. model = "x"[mcp_servers.demo]).
+    if [ -f "$config_file" ] && [ -s "$config_file" ]; then
+      local last_byte
+      last_byte="$(tail -c1 -- "$config_file"; printf 'x')"
+      if [ "${last_byte%x}" != $'\n' ]; then
+        printf '\n' >> "$config_file"
+      fi
+    fi
+
+    cat "$fragment_file" >> "$config_file"
+    return 0
+  fi
+
+  # JSON providers: validate fragment, then merge the key into the existing config.
+  if ! jq empty < "$fragment_file" 2>/dev/null; then
+    echo "Plugin MCP fragment is not valid JSON: ${fragment_file}" >&2
+    return 1
+  fi
+
+  if [ ! -f "$config_file" ]; then
+    echo '{}' > "$config_file"
+  fi
+
+  if ! jq empty < "$config_file" 2>/dev/null; then
+    echo "Existing provider config is not valid JSON: ${config_file}" >&2
+    return 1
+  fi
+
+  local merged
+  # Use variable binding to avoid losing array context after pipe.
+  merged="$(jq -s --arg key "$merge_key" \
+    '.[0] as $existing | .[1] as $fragment |
+     $existing | .[$key] = (($existing[$key] // {}) * ($fragment[$key] // {}))' \
+    "$config_file" "$fragment_file")" || {
+    echo "Failed to merge MCP config from ${fragment_file} into ${config_file}" >&2
+    return 1
+  }
+
+  printf '%s\n' "$merged" > "$config_file"
+}
+
+# Iterate over a comma-separated plugin list, validate each, and inject its
+# MCP config into the agent's provider config file.
+# Fails on invalid plugin names or missing plugin.yaml manifests.
+load_agent_plugins() {
+  local plugins_list="$1"
+  local plugins_dir="${2:-/opt/hivemoot-agent/plugins}"
+  local provider="$3"
+  local agent_home="$4"
+
+  [ -z "$plugins_list" ] && return 0
+
+  local plugin
+  while IFS= read -r plugin; do
+    plugin="$(trim "$plugin")"
+    [ -z "$plugin" ] && continue
+
+    case "$plugin" in
+      *[!a-zA-Z0-9_-]*)
+        echo "Invalid plugin name: '${plugin}' (AGENT_PLUGINS=${plugins_list})" >&2
+        return 1
+        ;;
+    esac
+
+    local manifest="${plugins_dir}/${plugin}/plugin.yaml"
+    if [ ! -f "$manifest" ]; then
+      echo "Plugin manifest not found: ${manifest} (AGENT_PLUGINS=${plugins_list})" >&2
+      return 1
+    fi
+
+    if ! inject_plugin_mcp_config "${plugins_dir}/${plugin}" "$provider" "$agent_home"; then
+      return 1
+    fi
+  done < <(tr ',' '\n' <<< "$plugins_list")
+}

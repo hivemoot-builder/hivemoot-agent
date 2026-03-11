@@ -271,6 +271,7 @@ target_repo="${TARGET_REPO:-}"
 workspace_root="${WORKSPACE_ROOT:-/workspace}"
 clone_depth="${GIT_CLONE_DEPTH:-50}"
 prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/system/autonomous.md}"
+agent_plugins="${AGENT_PLUGINS:-}"
 agent_skills="${AGENT_SKILLS:-}"
 agent_available_skills="${AGENT_AVAILABLE_SKILLS:-}"
 extra_prompt="${AGENT_EXTRA_PROMPT:-}"
@@ -513,6 +514,14 @@ if [ -n "$agent_skills" ]; then
 <skills>
 ${skills_content}
 </skills>"
+  fi
+fi
+
+# MCP plugin injection: merge each plugin's MCP server config into the
+# provider's config file before the provider starts.
+if [ -n "$agent_plugins" ]; then
+  if ! load_agent_plugins "$agent_plugins" "/opt/hivemoot-agent/plugins" "$provider" "$HOME"; then
+    exit 1
   fi
 fi
 
