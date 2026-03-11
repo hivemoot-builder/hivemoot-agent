@@ -564,6 +564,36 @@ test_inject_mcp_config_codex_rejects_unquoted_value() {
   echo "  ✓ Codex injection rejects fragment with unquoted string value"
 }
 
+test_inject_mcp_config_codex_rejects_malformed_array() {
+  echo "Testing Codex TOML injection rejects fragment with unclosed array value..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  local plugins_dir="${tmp_dir}/plugins"
+  local agent_home="${tmp_dir}/home"
+  mkdir -p "$agent_home"
+
+  # Repro: command = [ without a closing ] is syntactically invalid in TOML
+  # and previously slipped through validation because '['* matched the leading '['.
+  setup_test_plugin "$plugins_dir" "bad-array-plugin" \
+    "codex" $'[mcp_servers.demo]\ncommand = ['
+
+  source_lib
+  if inject_plugin_mcp_config "${plugins_dir}/bad-array-plugin" "codex" "$agent_home" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    fail "inject_plugin_mcp_config should reject fragment with unclosed array value"
+  fi
+
+  if [ -f "${agent_home}/.codex/config.toml" ]; then
+    rm -rf "$tmp_dir"
+    fail "Config file should not be created when fragment has unclosed array value"
+  fi
+
+  rm -rf "$tmp_dir"
+  echo "  ✓ Codex injection rejects fragment with unclosed array value"
+}
+
 echo "Running MCP plugin loading tests..."
 echo
 
@@ -585,6 +615,7 @@ test_load_agent_plugins_invalid_name
 test_load_agent_plugins_missing_manifest
 test_load_agent_plugins_empty_list
 test_inject_mcp_config_codex_rejects_unquoted_value
+test_inject_mcp_config_codex_rejects_malformed_array
 
 echo
 echo "All MCP plugin loading tests passed!"

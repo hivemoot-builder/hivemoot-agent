@@ -789,7 +789,22 @@ inject_plugin_mcp_config() {
           while [ "${kv_val}" != "${kv_val# }" ]; do kv_val="${kv_val# }"; done
           while [ "${kv_val}" != "${kv_val#	}" ]; do kv_val="${kv_val#	}"; done
           case "$kv_val" in
-            '"'*|"'"*|'['*|'{'*|[0-9]*|[+-][0-9]*|true*|false*|inf*|nan*) ;;
+            '"'*|"'"*|'{'*|[0-9]*|[+-][0-9]*|true*|false*|inf*|nan*) ;;
+            '['*)
+              # Phase 1: only single-line arrays are supported.
+              # Strip trailing whitespace and verify the array is closed on this line.
+              local arr_stripped="$kv_val"
+              while [ "${arr_stripped}" != "${arr_stripped% }" ];  do arr_stripped="${arr_stripped% }";  done
+              while [ "${arr_stripped}" != "${arr_stripped%	}" ]; do arr_stripped="${arr_stripped%	}"; done
+              case "$arr_stripped" in
+                *']') ;;
+                *)
+                  printf 'Codex fragment %s: unclosed array (multi-line arrays not supported): %s\n' \
+                    "$fragment_file" "$kv_line" >&2
+                  return 1
+                  ;;
+              esac
+              ;;
             *)
               printf 'Codex fragment %s: invalid TOML value (unquoted string?) in line: %s\n' \
                 "$fragment_file" "$kv_line" >&2
