@@ -535,6 +535,36 @@ test_inject_mcp_config_codex_rejects_top_level_keys() {
   echo "  ✓ Codex injection rejects fragment with top-level keys outside [mcp_servers.*] sections"
 }
 
+test_inject_mcp_config_codex_rejects_indented_top_level_keys() {
+  echo "Testing Codex TOML injection rejects fragment with indented top-level keys before first section..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  local plugins_dir="${tmp_dir}/plugins"
+  local agent_home="${tmp_dir}/home"
+  mkdir -p "$agent_home"
+
+  # Fragment has an indented top-level key before the [mcp_servers.*] section.
+  # Leading whitespace must not bypass the guard.
+  setup_test_plugin "$plugins_dir" "bad-plugin" \
+    "codex" $'  model = "unsafe"\n[mcp_servers.demo]\ncommand = "/bin/echo"'
+
+  source_lib
+  if inject_plugin_mcp_config "${plugins_dir}/bad-plugin" "codex" "$agent_home" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    fail "inject_plugin_mcp_config should reject fragment with indented top-level keys"
+  fi
+
+  if [ -f "${agent_home}/.codex/config.toml" ]; then
+    rm -rf "$tmp_dir"
+    fail "Config file should not be created when fragment has indented top-level keys"
+  fi
+
+  rm -rf "$tmp_dir"
+  echo "  ✓ Codex injection rejects fragment with indented top-level keys outside [mcp_servers.*] sections"
+}
+
 test_inject_mcp_config_codex_rejects_unquoted_value() {
   echo "Testing Codex TOML injection rejects fragment with unquoted string value..."
 
@@ -611,6 +641,7 @@ test_inject_mcp_config_idempotent_codex
 test_inject_mcp_config_codex_no_trailing_newline
 test_inject_mcp_config_codex_rejects_extra_table
 test_inject_mcp_config_codex_rejects_top_level_keys
+test_inject_mcp_config_codex_rejects_indented_top_level_keys
 test_load_agent_plugins_invalid_name
 test_load_agent_plugins_missing_manifest
 test_load_agent_plugins_empty_list

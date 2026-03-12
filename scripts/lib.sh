@@ -762,7 +762,7 @@ inject_plugin_mcp_config() {
 
     # Reject top-level keys that appear before the first [mcp_servers.*] section.
     local top_level_keys
-    top_level_keys="$(awk '/^\[mcp_servers\./ {exit} /^[^#[:space:]]/ {print}' "$fragment_file")"
+    top_level_keys="$(awk '/^\[mcp_servers\./ {exit} /^[[:space:]]*(#.*)?$/ {next} {print}' "$fragment_file")"
     if [ -n "$top_level_keys" ]; then
       printf 'Codex fragment %s contains top-level keys outside [mcp_servers.*] sections\n' "$fragment_file" >&2
       return 1
