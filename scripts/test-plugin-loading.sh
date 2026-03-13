@@ -113,13 +113,13 @@ test_inject_mcp_config_opencode() {
   mkdir -p "$agent_home"
 
   setup_test_plugin "$plugins_dir" "my-plugin" \
-    "opencode" '{"mcp":{"oc-srv":{"command":"node","args":["s.js"]}}}'
+    "opencode" '{"mcp":{"oc-srv":{"type":"local","command":["node","s.js"]}}}'
 
   source_lib
   inject_plugin_mcp_config "${plugins_dir}/my-plugin" "opencode" "$agent_home"
 
   local config_file="${agent_home}/.config/opencode/config.json"
-  if ! jq -e '.mcp["oc-srv"].command == "node"' "$config_file" > /dev/null; then
+  if ! jq -e '.mcp["oc-srv"]["type"] == "local"' "$config_file" > /dev/null; then
     rm -rf "$tmp_dir"
     fail "OpenCode config missing expected mcp entry"
   fi
@@ -139,13 +139,13 @@ test_inject_mcp_config_kilo() {
   mkdir -p "$agent_home"
 
   setup_test_plugin "$plugins_dir" "my-plugin" \
-    "kilo" '{"mcp":{"k-srv":{"command":"node","args":["s.js"]}}}'
+    "kilo" '{"mcp":{"k-srv":{"type":"local","command":["node","s.js"]}}}'
 
   source_lib
   inject_plugin_mcp_config "${plugins_dir}/my-plugin" "kilo" "$agent_home"
 
   local config_file="${agent_home}/.config/kilo/kilo.json"
-  if ! jq -e '.mcp["k-srv"].command == "node"' "$config_file" > /dev/null; then
+  if ! jq -e '.mcp["k-srv"]["type"] == "local"' "$config_file" > /dev/null; then
     rm -rf "$tmp_dir"
     fail "Kilo config missing expected mcp entry"
   fi
@@ -624,6 +624,68 @@ test_inject_mcp_config_codex_rejects_malformed_array() {
   echo "  ✓ Codex injection rejects fragment with unclosed array value"
 }
 
+test_inject_mcp_config_opencode_rejects_wrong_schema() {
+  echo "Testing OpenCode injection rejects fragment with wrong schema..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  local plugins_dir="${tmp_dir}/plugins"
+  local agent_home="${tmp_dir}/home"
+  mkdir -p "$agent_home"
+
+  # Fragment uses the old shape (no type, args instead of command array) — rejected by opencode 1.2.18
+  setup_test_plugin "$plugins_dir" "bad-schema-plugin" \
+    "opencode" '{"mcp":{"demo":{"command":"node","args":["s.js"]}}}'
+
+  source_lib
+  if inject_plugin_mcp_config "${plugins_dir}/bad-schema-plugin" "opencode" "$agent_home" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    fail "inject_plugin_mcp_config should reject OpenCode fragment missing type=local and command array"
+  fi
+
+  if [ -f "${agent_home}/.config/opencode/config.json" ]; then
+    if jq -e '.mcp' "${agent_home}/.config/opencode/config.json" > /dev/null 2>&1; then
+      rm -rf "$tmp_dir"
+      fail "Config file should not have mcp entries when fragment has wrong schema"
+    fi
+  fi
+
+  rm -rf "$tmp_dir"
+  echo "  ✓ OpenCode injection rejects fragment missing type=local and command array"
+}
+
+test_inject_mcp_config_kilo_rejects_wrong_schema() {
+  echo "Testing Kilo injection rejects fragment with wrong schema..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  local plugins_dir="${tmp_dir}/plugins"
+  local agent_home="${tmp_dir}/home"
+  mkdir -p "$agent_home"
+
+  # Fragment uses the old shape — rejected by kilo 7.0.39
+  setup_test_plugin "$plugins_dir" "bad-schema-plugin" \
+    "kilo" '{"mcp":{"demo":{"command":"node","args":["s.js"]}}}'
+
+  source_lib
+  if inject_plugin_mcp_config "${plugins_dir}/bad-schema-plugin" "kilo" "$agent_home" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    fail "inject_plugin_mcp_config should reject Kilo fragment missing type=local and command array"
+  fi
+
+  if [ -f "${agent_home}/.config/kilo/kilo.json" ]; then
+    if jq -e '.mcp' "${agent_home}/.config/kilo/kilo.json" > /dev/null 2>&1; then
+      rm -rf "$tmp_dir"
+      fail "Config file should not have mcp entries when fragment has wrong schema"
+    fi
+  fi
+
+  rm -rf "$tmp_dir"
+  echo "  ✓ Kilo injection rejects fragment missing type=local and command array"
+}
+
 echo "Running MCP plugin loading tests..."
 echo
 
@@ -647,6 +709,8 @@ test_load_agent_plugins_missing_manifest
 test_load_agent_plugins_empty_list
 test_inject_mcp_config_codex_rejects_unquoted_value
 test_inject_mcp_config_codex_rejects_malformed_array
+test_inject_mcp_config_opencode_rejects_wrong_schema
+test_inject_mcp_config_kilo_rejects_wrong_schema
 
 echo
 echo "All MCP plugin loading tests passed!"

@@ -846,6 +846,20 @@ inject_plugin_mcp_config() {
     return 1
   fi
 
+  # OpenCode/Kilo: each server entry under .mcp must have type="local" and a command array.
+  # Both CLIs reject any other shape at startup (verified against opencode 1.2.18, kilo 7.0.39).
+  if [ "$provider" = "opencode" ] || [ "$provider" = "kilo" ]; then
+    if ! jq -e '
+      (.mcp // {}) | to_entries | all(
+        .value | type == "object" and .type == "local" and (.command | type == "array")
+      )
+    ' "$fragment_file" > /dev/null 2>&1; then
+      printf 'OpenCode/Kilo MCP fragment %s: each server must have type="local" and command array\n' \
+        "$fragment_file" >&2
+      return 1
+    fi
+  fi
+
   if [ ! -f "$config_file" ]; then
     echo '{}' > "$config_file"
   fi
