@@ -221,6 +221,30 @@ test_load_multiple_skills() {
   echo "  ✓ Multiple skills load correctly with XML wrappers"
 }
 
+test_ensure_skill_files_exist() {
+  echo "Testing skill file validation..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  trap 'if [ -n "${tmp_dir:-}" ]; then rm -rf "$tmp_dir"; fi' EXIT
+
+  setup_test_skills "$tmp_dir"
+  source_lib
+
+  ensure_skill_files_exist "skill-one,skill-two" "$tmp_dir" || \
+    fail "ensure_skill_files_exist should accept valid skills"
+
+  if ensure_skill_files_exist "../escape" "$tmp_dir" 2>/dev/null; then
+    fail "ensure_skill_files_exist should reject invalid skill names"
+  fi
+
+  if ensure_skill_files_exist "missing-skill" "$tmp_dir" 2>/dev/null; then
+    fail "ensure_skill_files_exist should fail when a skill file is missing"
+  fi
+
+  echo "  ✓ Skill file validation behaves correctly"
+}
+
 test_invalid_skill_name() {
   echo "Testing invalid skill name rejection..."
 
@@ -276,6 +300,89 @@ test_empty_skill_list() {
   fi
 
   echo "  ✓ Empty skill list returns nothing"
+}
+
+test_slot_specific_skill_loading() {
+  echo "Testing slot-specific skill loading..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  trap 'if [ -n "${tmp_dir:-}" ]; then rm -rf "$tmp_dir"; fi' EXIT
+
+  source_lib
+
+  export AGENT_ID_01="worker"
+  export AGENT_GITHUB_TOKEN_01="token-one"
+  export AGENT_SKILLS_01="skill-one,skill-two"
+  export AGENT_ID_02="builder"
+  export AGENT_GITHUB_TOKEN_02="token-two"
+  export AGENT_SKILLS="global-skill"
+
+  declare -A seen_agents=()
+  declare -A agent_skill_lists=()
+  declare -a agent_ids=()
+  declare -a agent_tokens=()
+  load_agent_slots 2
+
+  if [ "${agent_skill_lists[worker]:-}" != "skill-one,skill-two" ]; then
+    fail "load_agent_slots should record slot-specific skills for worker"
+  fi
+
+  if [ "${agent_skill_lists[builder]+_}" = "_" ]; then
+    fail "load_agent_slots should not create an empty slot-specific skill entry"
+  fi
+
+  if [ "$(resolve_agent_skill_list "worker")" != "skill-one,skill-two" ]; then
+    fail "resolve_agent_skill_list should prefer slot-specific skills"
+  fi
+
+  if [ "$(resolve_agent_skill_list "builder")" != "global-skill" ]; then
+    fail "resolve_agent_skill_list should fall back to AGENT_SKILLS"
+  fi
+
+  unset AGENT_ID_01 AGENT_GITHUB_TOKEN_01 AGENT_SKILLS_01
+  unset AGENT_ID_02 AGENT_GITHUB_TOKEN_02 AGENT_SKILLS
+
+  echo "  ✓ Slot-specific skills resolve correctly"
+}
+
+test_preflight_check_agent_skill_lists() {
+  echo "Testing preflight agent skill validation..."
+
+  local tmp_dir
+  local failures=0
+  tmp_dir="$(mktemp -d)"
+  trap 'if [ -n "${tmp_dir:-}" ]; then rm -rf "$tmp_dir"; fi' EXIT
+
+  setup_test_skills "$tmp_dir"
+  source_lib
+
+  export AGENT_ID_01="worker"
+  export AGENT_GITHUB_TOKEN_01="token-one"
+  export AGENT_SKILLS_01="skill-one"
+  export AGENT_ID_02="builder"
+  export AGENT_GITHUB_TOKEN_02="token-two"
+  export AGENT_SKILLS_02="skill-one"
+  export AGENT_ID_03="reviewer"
+  export AGENT_GITHUB_TOKEN_03="token-three"
+  export AGENT_SKILLS_03="missing-skill"
+
+  declare -A seen_agents=()
+  declare -A agent_skill_lists=()
+  declare -a agent_ids=()
+  declare -a agent_tokens=()
+  load_agent_slots 3
+
+  preflight_check_agent_skill_lists "$tmp_dir" 2>/dev/null || failures=$?
+  if [ "$failures" -ne 1 ]; then
+    fail "preflight_check_agent_skill_lists should count one missing skill list"
+  fi
+
+  unset AGENT_ID_01 AGENT_GITHUB_TOKEN_01 AGENT_SKILLS_01
+  unset AGENT_ID_02 AGENT_GITHUB_TOKEN_02 AGENT_SKILLS_02
+  unset AGENT_ID_03 AGENT_GITHUB_TOKEN_03 AGENT_SKILLS_03
+
+  echo "  ✓ Preflight agent skill validation deduplicates shared lists"
 }
 
 test_shipped_skills_load() {
@@ -343,6 +450,112 @@ test_shipped_skills_load() {
   echo "  ✓ All shipped skills load correctly (${expected_skills// /, })"
 }
 
+test_generate_claude_plugin_dir_basic() {
+  echo "Testing generate_claude_plugin_dir basic success..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  setup_test_skills "$tmp_dir"
+  source_lib
+
+  local plugin_dir
+  plugin_dir="$(generate_claude_plugin_dir "skill-one,skill-two" "$tmp_dir")"
+
+  if [ -z "$plugin_dir" ]; then
+    rm -rf "$tmp_dir"
+    fail "generate_claude_plugin_dir should return a non-empty path"
+  fi
+
+  if [ ! -f "${plugin_dir}/.claude-plugin/plugin.json" ]; then
+    rm -rf "$plugin_dir" "$tmp_dir"
+    fail "plugin.json missing from plugin dir"
+  fi
+
+  if [ ! -f "${plugin_dir}/skills/skill-one/SKILL.md" ]; then
+    rm -rf "$plugin_dir" "$tmp_dir"
+    fail "skill-one/SKILL.md not copied into plugin dir"
+  fi
+
+  if [ ! -f "${plugin_dir}/skills/skill-two/SKILL.md" ]; then
+    rm -rf "$plugin_dir" "$tmp_dir"
+    fail "skill-two/SKILL.md not copied into plugin dir"
+  fi
+
+  # Frontmatter must be preserved (native Claude dispatch reads it directly)
+  if ! grep -q "name: skill-one" "${plugin_dir}/skills/skill-one/SKILL.md"; then
+    rm -rf "$plugin_dir" "$tmp_dir"
+    fail "generate_claude_plugin_dir must preserve frontmatter (raw cp)"
+  fi
+
+  rm -rf "$plugin_dir" "$tmp_dir"
+  echo "  ✓ generate_claude_plugin_dir builds correct layout with frontmatter intact"
+}
+
+test_generate_claude_plugin_dir_all_mode() {
+  echo "Testing generate_claude_plugin_dir with 'all' keyword..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  setup_test_skills "$tmp_dir"
+  source_lib
+
+  local plugin_dir
+  plugin_dir="$(generate_claude_plugin_dir "all" "$tmp_dir")"
+
+  if [ -z "$plugin_dir" ]; then
+    rm -rf "$tmp_dir"
+    fail "generate_claude_plugin_dir 'all' should return a non-empty path"
+  fi
+
+  # Should discover all skills that have SKILL.md
+  local skill_count
+  skill_count="$(find "${plugin_dir}/skills" -name 'SKILL.md' | wc -l | tr -d ' ')"
+
+  if [ "$skill_count" -lt 2 ]; then
+    rm -rf "$plugin_dir" "$tmp_dir"
+    fail "generate_claude_plugin_dir 'all' should discover multiple skills, found ${skill_count}"
+  fi
+
+  rm -rf "$plugin_dir" "$tmp_dir"
+  echo "  ✓ generate_claude_plugin_dir 'all' auto-discovers all skills (found ${skill_count})"
+}
+
+test_generate_claude_plugin_dir_cp_failure() {
+  echo "Testing generate_claude_plugin_dir fails closed on cp failure..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  setup_test_skills "$tmp_dir"
+  source_lib
+
+  # Override cp to simulate a write failure
+  cp() { return 1; }
+
+  local plugin_dir before_count after_count
+  before_count="$(find /tmp -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l || echo 0)"
+
+  if plugin_dir="$(generate_claude_plugin_dir "skill-one" "$tmp_dir" 2>/dev/null)"; then
+    unset -f cp
+    rm -rf "$tmp_dir"
+    fail "generate_claude_plugin_dir should return non-zero when cp fails"
+  fi
+
+  unset -f cp
+
+  after_count="$(find /tmp -maxdepth 1 -name 'tmp.*' -type d 2>/dev/null | wc -l || echo 0)"
+
+  if [ "$after_count" -gt "$before_count" ]; then
+    rm -rf "$tmp_dir"
+    fail "generate_claude_plugin_dir leaked a temp dir on cp failure (before=$before_count after=$after_count)"
+  fi
+
+  rm -rf "$tmp_dir"
+  echo "  ✓ generate_claude_plugin_dir fails closed and cleans up on cp failure"
+}
+
 echo "Running skill loading tests..."
 echo
 
@@ -350,10 +563,16 @@ test_strip_frontmatter
 test_frontmatter_with_divider
 test_load_single_skill
 test_load_multiple_skills
+test_ensure_skill_files_exist
 test_invalid_skill_name
 test_missing_skill_file
 test_empty_skill_list
+test_slot_specific_skill_loading
+test_preflight_check_agent_skill_lists
 test_shipped_skills_load
+test_generate_claude_plugin_dir_basic
+test_generate_claude_plugin_dir_all_mode
+test_generate_claude_plugin_dir_cp_failure
 
 echo
 echo "All skill loading tests passed!"

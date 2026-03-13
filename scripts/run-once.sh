@@ -77,10 +77,14 @@ process.stdout.write(parts.join("\n\n"));
 }
 
 _cleanup_files=()
+_cleanup_dirs=()
 # shellcheck disable=SC2317,SC2329  # invoked via trap
 cleanup_once() {
   for f in "${_cleanup_files[@]-}"; do
     rm -f "$f" 2>/dev/null || true
+  done
+  for d in "${_cleanup_dirs[@]-}"; do
+    rm -rf "$d" 2>/dev/null || true
   done
 }
 trap cleanup_once EXIT
@@ -105,6 +109,8 @@ load_provider_secrets
 
 # shellcheck source=scripts/opencode-helpers.sh
 . "${SCRIPT_DIR}/opencode-helpers.sh"
+# shellcheck source=scripts/token-extractor.sh
+. "${SCRIPT_DIR}/token-extractor.sh"
 
 is_valid_uuid() {
   local value="$1"
@@ -258,6 +264,8 @@ should_resume_session() {
 
 provider="${AGENT_PROVIDER:-claude}"
 auth_mode="${AGENT_AUTH_MODE:-auto}"
+# Default to "manual" for standalone invocations; controller injects the real value.
+RUN_TRIGGER_TYPE="${RUN_TRIGGER_TYPE:-manual}"
 hivemoot_buzz_role="${HIVEMOOT_BUZZ_ROLE:-}"
 target_repo="${TARGET_REPO:-}"
 workspace_root="${WORKSPACE_ROOT:-/workspace}"
@@ -266,6 +274,7 @@ clone_depth="${GIT_CLONE_DEPTH:-50}"
 shared_clone_cache="${SHARED_CLONE_CACHE:-1}"
 prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/system/autonomous.md}"
 agent_skills="${AGENT_SKILLS:-}"
+agent_available_skills="${AGENT_AVAILABLE_SKILLS:-}"
 extra_prompt="${AGENT_EXTRA_PROMPT:-}"
 agent_model="${AGENT_MODEL:-}"
 agent_tool_options_json="${AGENT_TOOL_OPTIONS_JSON:-"{}"}"
@@ -881,6 +890,55 @@ You are resuming a prior session for this mention thread. Some data in your cont
     fi
     log "Claude auth mode resolved to: ${claude_auth_mode}"
 
+    # Deny rules are enforced even with --dangerously-skip-permissions;
+    # they block naive single-command exfiltration patterns from prompt injection.
+    # See issue #94 for analysis and rationale.
+    # Note: Bash(*) access means sufficiently creative shell invocations
+    # (e.g. bash -c 'env', python3 -c 'import os; print(os.environ)') cannot
+    # be blocked by deny lists alone — container isolation is the primary defense.
+    claude_disallowed_tools=(
+      "Bash(env)"
+      "Bash(env *)"
+      "Bash(printenv)"
+      "Bash(printenv *)"
+      "Bash(set)"
+      "Bash(set *)"
+      "Bash(export)"
+      "Bash(export *)"
+      "Bash(declare)"
+      "Bash(declare *)"
+      "Bash(cat /run/secrets/*)"
+      "Bash(* /run/secrets/*)"
+      "Read(/run/secrets/*)"
+      # /proc/*/environ contains the full process environment as null-separated
+      # KEY=VALUE pairs — reading it bypasses all shell-builtin deny rules above.
+      # Glob covers /proc/self/environ, /proc/1/environ, and arbitrary PID paths.
+      # Linux-specific; consistent with the /run/secrets/* entries above.
+      "Bash(cat /proc/*/environ)"
+      "Bash(* /proc/*/environ)"
+      "Read(/proc/*/environ)"
+    )
+
+    # Available skills: Claude-only on-demand plugin dispatch.
+    # AGENT_SKILLS are always injected via --append-system-prompt (V1 path above).
+    # AGENT_AVAILABLE_SKILLS loads additional skills as native plugins via --plugin-dir
+    # so the agent can discover and invoke them on demand.
+    # Requires Claude CLI with --plugin-dir support. No fallback — if the flag is
+    # unsupported, the run fails immediately rather than silently dropping skills.
+    claude_plugin_dir=""
+    if [ -n "$agent_available_skills" ]; then
+      if ! claude --help 2>&1 | grep -q -- '--plugin-dir'; then
+        echo "AGENT_AVAILABLE_SKILLS is set but the installed Claude CLI does not support --plugin-dir." >&2
+        echo "Update CLAUDE_CODE_VERSION to a release that supports --plugin-dir, or unset AGENT_AVAILABLE_SKILLS." >&2
+        exit 1
+      fi
+      if ! claude_plugin_dir="$(generate_claude_plugin_dir "$agent_available_skills" "/opt/hivemoot-agent/skills")"; then
+        exit 1
+      fi
+      _cleanup_dirs+=("$claude_plugin_dir")
+      log "Claude available skills: plugin-dir (${claude_plugin_dir})"
+    fi
+
     # In task mode, use text output format so the log IS the answer text.
     # Remove --verbose to keep stdout clean (verbose lines would pollute the
     # extracted result). Keep stream-json + verbose for non-task runs where
@@ -890,9 +948,13 @@ You are resuming a prior session for this mention thread. Some data in your cont
     else
       claude_fresh_cmd=(claude -p --verbose --output-format stream-json --dangerously-skip-permissions)
     fi
+    claude_fresh_cmd+=(--disallowedTools "${claude_disallowed_tools[@]}")
     claude_fresh_cmd+=(--append-system-prompt "$system_prompt")
     if [ -n "$agent_model" ]; then
       claude_fresh_cmd+=(--model "$agent_model")
+    fi
+    if [ -n "$claude_plugin_dir" ]; then
+      claude_fresh_cmd+=(--plugin-dir "$claude_plugin_dir")
     fi
     claude_fresh_cmd+=("$user_message")
 
@@ -943,9 +1005,13 @@ You are resuming a prior session for this mention thread. Some data in your cont
       else
         cmd=(claude --resume "$claude_active_session_id" -p --verbose --output-format stream-json --dangerously-skip-permissions)
       fi
+      cmd+=(--disallowedTools "${claude_disallowed_tools[@]}")
       cmd+=(--append-system-prompt "$system_prompt")
       if [ -n "$agent_model" ]; then
         cmd+=(--model "$agent_model")
+      fi
+      if [ -n "$claude_plugin_dir" ]; then
+        cmd+=(--plugin-dir "$claude_plugin_dir")
       fi
       cmd+=("$claude_resume_user_message")
     else
@@ -1212,10 +1278,30 @@ if [ -n "${HEALTH_REPORT_URL:-}" ]; then
       || true)"
   fi
 
+  # Extract token usage from the per-attempt log (best-effort; empty string if unavailable).
+  _token_usage_json=""
+  if [ -n "${last_command_log:-}" ] && [ -f "${last_command_log}" ]; then
+    case "$provider" in
+      claude) _token_usage_json="$(extract_claude_token_usage_from_log "$last_command_log")" || true ;;
+      codex)  _token_usage_json="$(extract_codex_token_usage_from_log "$last_command_log")" || true ;;
+      *)      _token_usage_json="" ;;
+    esac
+  fi
+
+  # Extract run summary from the per-attempt log (best-effort; empty string if unavailable).
+  # Gated by HEALTH_REPORT_RUN_SUMMARY=1 (default off) to avoid sending the field to backends
+  # that don't yet have run_summary in their HealthReport schema, which would turn valid
+  # health reports into 400 responses during the migration window.
+  _run_summary=""
+  if [ "${HEALTH_REPORT_RUN_SUMMARY:-0}" = "1" ] && [ -n "${last_command_log:-}" ] && [ -f "${last_command_log}" ]; then
+    _run_summary="$(extract_run_summary_from_log "$provider" "$last_command_log")" || true
+  fi
+
   report_health_to_backend \
     "$agent_name" "$target_repo" "${HIVEMOOT_AGENT_TOKEN:-}" \
     "$run_id" "$_run_outcome" "$run_duration_secs" "${_consecutive_failures:-0}" \
-    "$exit_code" "${_run_error:-}" "$_next_run_at" || true
+    "$exit_code" "${_run_error:-}" "$_next_run_at" \
+    "${RUN_TRIGGER_TYPE:-manual}" "$_token_usage_json" "$_run_summary" || true
 fi
 
 if [ -n "${last_command_log:-}" ] && [ "$last_command_log" != "$log_file" ] && [ -f "$last_command_log" ]; then

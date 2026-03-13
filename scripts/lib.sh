@@ -154,7 +154,7 @@ resolve_secret_value() {
 }
 
 # Load all provider API secrets from their corresponding *_FILE env vars.
-# Called at startup in every entrypoint (entrypoint.sh, run-loop.sh,
+# Called at startup in every entrypoint (entrypoint.sh, run-loop.sh [deprecated],
 # run-multi.sh, run-once.sh) so new provider keys only need adding here.
 load_provider_secrets() {
   local secret_var
@@ -195,27 +195,46 @@ strip_frontmatter() {
   awk 'BEGIN{fm=0} /^---$/ && fm<2 {fm++; next} fm>=2||fm==0{print}' "$file"
 }
 
+ensure_skill_files_exist() {
+  local skills_list="$1"
+  local skills_dir="${2:-/opt/hivemoot-agent/skills}"
+  local context="${3:-AGENT_SKILLS=${skills_list}}"
+
+  [ -z "$skills_list" ] && return 0
+
+  local skill skill_file
+  while IFS= read -r skill; do
+    skill="$(trim "$skill")"
+    [ -z "$skill" ] && continue
+    case "$skill" in
+      *[!a-zA-Z0-9_-]*)
+        echo "Invalid skill name: '${skill}' (${context})" >&2
+        return 1
+        ;;
+    esac
+    skill_file="${skills_dir}/${skill}/SKILL.md"
+    if [ ! -f "$skill_file" ]; then
+      echo "Skill file not found: ${skill_file} (${context})" >&2
+      return 1
+    fi
+  done < <(tr ',' '\n' <<< "$skills_list")
+}
+
 load_skill_prompts() {
   local skills_list="$1"
   local skills_dir="${2:-/opt/hivemoot-agent/skills}"
 
   [ -z "$skills_list" ] && return 0
 
+  if ! ensure_skill_files_exist "$skills_list" "$skills_dir" "AGENT_SKILLS=${skills_list}"; then
+    return 1
+  fi
+
   local skill skill_file result="" first=1
   while IFS= read -r skill; do
     skill="$(trim "$skill")"
     [ -z "$skill" ] && continue
-    case "$skill" in
-      *[!a-zA-Z0-9_-]*)
-        echo "Invalid skill name: '${skill}' (AGENT_SKILLS=${skills_list})" >&2
-        return 1
-        ;;
-    esac
     skill_file="${skills_dir}/${skill}/SKILL.md"
-    if [ ! -f "$skill_file" ]; then
-      echo "Skill file not found: ${skill_file} (AGENT_SKILLS=${skills_list})" >&2
-      return 1
-    fi
     local body
     body="$(strip_frontmatter "$skill_file")"
     if [ "$first" -eq 1 ]; then
@@ -233,6 +252,76 @@ ${body}
   done < <(tr ',' '\n' <<< "$skills_list")
 
   printf '%s' "$result"
+}
+
+# Generate an ephemeral Claude --plugin-dir layout from a skill list.
+# Writes the following structure to a new temp directory:
+#
+#   <tmpdir>/.claude-plugin/plugin.json
+#   <tmpdir>/skills/<name>/SKILL.md     (copied from skills_dir)
+#
+# Returns the temp directory path on stdout on success.
+# On error, removes the temp directory and returns non-zero.
+# Callers must register the returned path for cleanup (e.g. _cleanup_dirs+=).
+#
+# Pass "all" as skills_list to auto-discover every skill in skills_dir.
+generate_claude_plugin_dir() {
+  local skills_list="$1"
+  local skills_dir="${2:-/opt/hivemoot-agent/skills}"
+
+  [ -z "$skills_list" ] && return 0
+
+  # Resolve "all" to every subdirectory containing SKILL.md.
+  if [ "$skills_list" = "all" ]; then
+    local discovered="" sep=""
+    local entry
+    for entry in "${skills_dir}"/*/SKILL.md; do
+      [ -f "$entry" ] || continue
+      local dirname
+      dirname="$(basename "$(dirname "$entry")")"
+      discovered="${discovered}${sep}${dirname}"
+      sep=","
+    done
+    if [ -z "$discovered" ]; then
+      echo "generate_claude_plugin_dir: no skills found in ${skills_dir}" >&2
+      return 1
+    fi
+    skills_list="$discovered"
+  fi
+
+  local plugin_dir
+  plugin_dir="$(mktemp -d)" || { echo "generate_claude_plugin_dir: mktemp -d failed" >&2; return 1; }
+
+  mkdir -p "${plugin_dir}/.claude-plugin" || { rm -rf "$plugin_dir"; return 1; }
+  printf '{"name":"hivemoot-skills","version":"1.0.0","description":"Composable skill modules for hivemoot-agent"}\n' \
+    > "${plugin_dir}/.claude-plugin/plugin.json" || { rm -rf "$plugin_dir"; return 1; }
+
+  local skills_plugin_dir
+  skills_plugin_dir="${plugin_dir}/skills"
+  mkdir -p "$skills_plugin_dir" || { rm -rf "$plugin_dir"; return 1; }
+
+  local skill skill_file
+  while IFS= read -r skill; do
+    skill="$(trim "$skill")"
+    [ -z "$skill" ] && continue
+    case "$skill" in
+      *[!a-zA-Z0-9_-]*)
+        echo "Invalid skill name: '${skill}' (AGENT_AVAILABLE_SKILLS=${skills_list})" >&2
+        rm -rf "$plugin_dir"
+        return 1
+        ;;
+    esac
+    skill_file="${skills_dir}/${skill}/SKILL.md"
+    if [ ! -f "$skill_file" ]; then
+      echo "Skill file not found: ${skill_file} (AGENT_AVAILABLE_SKILLS=${skills_list})" >&2
+      rm -rf "$plugin_dir"
+      return 1
+    fi
+    mkdir -p "${skills_plugin_dir}/${skill}" || { rm -rf "$plugin_dir"; return 1; }
+    cp "$skill_file" "${skills_plugin_dir}/${skill}/SKILL.md" || { rm -rf "$plugin_dir"; return 1; }
+  done < <(tr ',' '\n' <<< "$skills_list")
+
+  printf '%s' "$plugin_dir"
 }
 
 validate_target_repo() {
@@ -301,6 +390,50 @@ validate_agent_id() {
   esac
 }
 
+# Returns 0 if task_id is safe for use in paths and URLs, 1 otherwise.
+# Allowed: alphanumeric, hyphens, underscores, dots (no slashes, no whitespace).
+# Explicitly rejected: empty string, bare "." and "..".
+task_id_is_valid() {
+  local task_id="$1"
+  case "$task_id" in
+    ''|.|..|*[!A-Za-z0-9._-]*)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+validate_task_id() {
+  local task_id="$1"
+  if ! task_id_is_valid "$task_id"; then
+    echo "Invalid task_id: ${task_id}" >&2
+    exit 1
+  fi
+}
+
+require_non_negative_integer() {
+  local name="$1"
+  local value="$2"
+
+  case "$value" in
+    ''|*[!0-9]*)
+      echo "${name} must be a non-negative integer" >&2
+      exit 1
+      ;;
+  esac
+}
+
+require_positive_integer() {
+  local name="$1"
+  local value="$2"
+
+  require_non_negative_integer "$name" "$value"
+  if [ "$value" -le 0 ]; then
+    echo "${name} must be > 0" >&2
+    exit 1
+  fi
+}
+
 # Deterministic offset within an interval for staggered scheduling.
 # md5(repo:agent_id) % interval → seconds. Spreads agents evenly so
 # they never cluster at the same wake-up time.
@@ -364,33 +497,49 @@ load_slot_token() {
   printf '%s' "$token"
 }
 
+load_slot_skills() {
+  local suffix="$1"
+  local skills_var="AGENT_SKILLS_${suffix}"
+  printf '%s' "$(trim "${!skills_var:-}")"
+}
+
 # Populate caller-declared seen_agents, agent_ids, and agent_tokens by reading
 # AGENT_ID_XX / AGENT_GITHUB_TOKEN_XX(_FILE) env vars for slots 1..<max_slots>.
+# If the caller declares agent_skill_lists as an associative array, populate it
+# from optional AGENT_SKILLS_XX values for matching slots.
 # Arrays must be declared in the caller scope before calling this function:
 #   declare -A seen_agents=()
 #   declare -a agent_ids=()
 #   declare -a agent_tokens=()
+#   declare -A agent_skill_lists=()
 load_agent_slots() {
   local max_slots="${1:-10}"
-  local slot suffix id_var token_var token_file_var
-  local agent_id agent_token token_inline token_file
+  local slot suffix id_var token_var token_file_var skills_var
+  local agent_id agent_token token_inline token_file agent_skill_list
+  local populate_skill_lists=0
+
+  if declare -p agent_skill_lists >/dev/null 2>&1; then
+    populate_skill_lists=1
+  fi
 
   for slot in $(seq 1 "$max_slots"); do
     suffix="$(printf '%02d' "$slot")"
     id_var="AGENT_ID_${suffix}"
     token_var="AGENT_GITHUB_TOKEN_${suffix}"
     token_file_var="${token_var}_FILE"
+    skills_var="AGENT_SKILLS_${suffix}"
 
     agent_id="$(trim "${!id_var:-}")"
     token_inline="${!token_var:-}"
     token_file="${!token_file_var:-}"
+    agent_skill_list="$(load_slot_skills "$suffix")"
 
-    if [ -z "$agent_id" ] && [ -z "$token_inline" ] && [ -z "$token_file" ]; then
+    if [ -z "$agent_id" ] && [ -z "$token_inline" ] && [ -z "$token_file" ] && [ -z "$agent_skill_list" ]; then
       continue
     fi
 
     if [ -z "$agent_id" ]; then
-      echo "${id_var} is required when ${token_var} or ${token_file_var} is set." >&2
+      echo "${id_var} is required when ${token_var}, ${token_file_var}, or ${skills_var} is set." >&2
       exit 1
     fi
 
@@ -410,12 +559,51 @@ load_agent_slots() {
 
     agent_ids+=("$agent_id")
     agent_tokens+=("$agent_token")
+    if [ "$populate_skill_lists" -eq 1 ] && [ -n "$agent_skill_list" ]; then
+      agent_skill_lists["$agent_id"]="$agent_skill_list"
+    fi
   done
 
   if [ "${#agent_ids[@]}" -eq 0 ]; then
     echo "No agents configured. Set AGENT_ID_01 + AGENT_GITHUB_TOKEN_01 (up to _10)." >&2
     exit 1
   fi
+}
+
+resolve_agent_skill_list() {
+  local agent_id="$1"
+  local fallback="${2:-${AGENT_SKILLS:-}}"
+
+  if declare -p agent_skill_lists >/dev/null 2>&1; then
+    if [ "${agent_skill_lists[$agent_id]+_}" = "_" ]; then
+      printf '%s' "${agent_skill_lists[$agent_id]}"
+      return 0
+    fi
+  fi
+
+  printf '%s' "$fallback"
+}
+
+preflight_check_agent_skill_lists() {
+  local skills_dir="${1:-/opt/hivemoot-agent/skills}"
+  local agent_id=""
+  local skills_list=""
+  local failures=0
+  declare -A checked_skill_lists=()
+
+  for agent_id in "${agent_ids[@]}"; do
+    skills_list="$(resolve_agent_skill_list "$agent_id")"
+    [ -z "$skills_list" ] && continue
+    if [ -n "${checked_skill_lists[$skills_list]:-}" ]; then
+      continue
+    fi
+    checked_skill_lists["$skills_list"]=1
+    if ! ensure_skill_files_exist "$skills_list" "$skills_dir" "AGENT_SKILLS(${agent_id})=${skills_list}"; then
+      failures=$((failures + 1))
+    fi
+  done
+
+  return "$failures"
 }
 
 preflight_check_provider_auth() {
@@ -592,11 +780,11 @@ seed_provider_auth() {
   fi
   # Codex: skip conversations/, cache/
 
-  # Gemini: seed only known auth/credential files; skip session state
-  # (memory.md, settings.json, state.json, telemetry, etc.)
+  # Gemini: seed auth/credential files + settings.json (contains auth method
+  # selection); skip session state (memory.md, state.json, telemetry, etc.)
   if [ -d "${source_home}/.gemini" ]; then
     mkdir -p "${agent_home}/.gemini"
-    for f in oauth_creds.json google_accounts.json mcp-oauth-tokens.json mcp-oauth-tokens-v2.json .env; do
+    for f in oauth_creds.json google_accounts.json settings.json mcp-oauth-tokens.json mcp-oauth-tokens-v2.json .env; do
       if [ -f "${source_home}/.gemini/$f" ]; then
         cp "${source_home}/.gemini/$f" "${agent_home}/.gemini/$f"
       fi

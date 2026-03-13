@@ -79,7 +79,7 @@ No prompting. No supervision. They're your teammates — they figure out what ne
 ## At a Glance
 
 | Feature | Details |
-|---|---|
+| --- | --- |
 | **Providers** | Claude, Codex, Gemini, Kilo, OpenCode — swap via `.env` |
 | **Agents** | Up to 10 identities running in parallel per container |
 | **Isolation** | Each agent gets its own clone, credentials, logs, home dir |
@@ -175,6 +175,10 @@ docker compose run --rm -v ./secrets:/run/secrets:ro hivemoot-agent
 
 **Loop** — run agents periodically on a schedule:
 
+> **Deprecated:** `RUN_MODE=loop` (Phase 1 in-container supervisor) is deprecated.
+> Migrate to the [Host Controller](#host-controller-phase-2-mvp) (`scripts/controller.sh`)
+> for the recommended deployment. The in-container loop mode will be removed in a future release.
+
 ```bash
 RUN_MODE=loop docker compose up hivemoot-agent
 ```
@@ -205,6 +209,7 @@ RUN_MODE=loop WATCH_MENTIONS=1 docker compose up hivemoot-agent
 
 Requires `TARGET_REPO` and user tokens (not installation tokens). Additional settings:
 - `WATCH_POLL_INTERVAL` — seconds between mention polls (default: 300)
+- `WATCH_REVIEW_REQUESTS` — set `1` to also watch for PR review requests and dispatch review jobs (requires `WATCH_MENTIONS=1`)
 - `SESSION_RESUME` — set `0` to disable session resume and always start fresh runs (default: `1`)
 - `SESSION_RESUME_MAX_IDLE_HOURS` — reset stale sessions after this idle window (default: `12`)
 - `SESSION_RESUME_MAX_AGE_HOURS` — reset sessions older than this total age window (default: `24`)
@@ -269,13 +274,14 @@ HEALTH_REPORT_URL=https://your-backend.example.com/api/agent-health
 **Configuration:**
 
 | Variable | Default | Description |
-|---|---|---|
+| --- | --- | --- |
 | `HEALTH_REPORT_URL` | *(empty — disabled)* | Backend endpoint URL |
 | `HIVEMOOT_AGENT_TOKEN` | *(empty)* | Shared bearer token used by task mode and health reporting |
 | `HIVEMOOT_AGENT_TOKEN_FILE` | *(empty)* | Optional file path for `HIVEMOOT_AGENT_TOKEN` |
 | `HEALTH_REPORT_TIMEOUT_SECS` | `10` | Per-request timeout |
 | `HEALTH_REPORT_MAX_RETRIES` | `2` | Retry attempts for 5xx/network errors |
 | `HEARTBEAT_INTERVAL_SECS` | `1800` | Controller periodic heartbeat cadence in seconds (`0` disables); default 30 min |
+| `HEALTH_REPORT_RUN_SUMMARY` | `0` | Include agent run summary in health payloads (`0`=off, `1`=on). Enable only after the backend schema accepts `run_summary`. |
 
 **Failure behavior:**
 
@@ -561,6 +567,25 @@ When unset, standing agents use `prompts/system/autonomous.md` (prepended by
 `prompts/system/base.md`) and task mode uses `prompts/system/task.md`
 (also prepended by `prompts/system/base.md`).
 
+## Skills
+
+Use `AGENT_SKILLS` to inject a comma-separated list of skill modules from
+`/opt/hivemoot-agent/skills/<name>/SKILL.md` into the composed system prompt.
+Built-in image skills and read-only bind mounts both resolve through that same
+path.
+
+When running the host controller, `AGENT_SKILL_BIND_MOUNTS` can expose custom
+skill directories into worker containers. Each mount must use an absolute host
+path and the exact read-only destination format
+`/host/path:/opt/hivemoot-agent/skills/<name>:ro`. Provide multiple mounts as
+newline-separated specs; destinations outside `/opt/hivemoot-agent/skills/` and
+any `..` segments are rejected.
+
+Managed multi-agent runtimes can also set `AGENT_SKILLS_01` through
+`AGENT_SKILLS_10`. The controller resolves the matching slot for each
+configured `AGENT_ID_XX` and forwards only that skill list to the worker job.
+When a slot-specific value is unset, the runtime falls back to `AGENT_SKILLS`.
+
 ## Optional Override Services
 
 To target multiple repos from one setup, create `docker-compose.override.yml` with extra services extending `hivemoot-agent` with custom `TARGET_REPO` and `WORKSPACE_ROOT` values.
@@ -663,6 +688,18 @@ OPENROUTER_API_KEY_FILE=/run/secrets/openrouter_api_key
 - Use least-privilege GitHub tokens
 - Default `api_key` runs keep provider credential homes on `tmpfs` (RAM-backed).
 - In local subscription override mode, treat provider volumes and `./data/homes/<agent-id>` as sensitive credential state.
+
+### Provider Tool Restriction Posture (Current `main`)
+
+| Provider | Current CLI posture | Effective runtime boundary | Pending improvement |
+| --- | --- | --- | --- |
+| Claude | `--dangerously-skip-permissions` (no active deny-tool flag in `main`) | Container isolation plus your mounted workspace | `--disallowedTools` hardening in [#223](https://github.com/hivemoot/hivemoot-agent/pull/223) |
+| Codex | `--dangerously-bypass-approvals-and-sandbox` (no active Codex sandbox flag in `main`) | Container isolation plus your mounted workspace | `--full-auto` workspace-write path in [#224](https://github.com/hivemoot/hivemoot-agent/pull/224) |
+| Gemini | `--yolo` (this runtime does not configure Gemini policy/sandbox controls) | Container isolation plus your mounted workspace | Configure Gemini CLI `--sandbox`, `--approval-mode`, and `--policy` in runtime defaults |
+| Kilo | `kilo run --auto` (no provider-level deny list configured by this runtime) | Container isolation plus your mounted workspace | Depends on upstream/provider-specific capability support |
+| OpenCode | `opencode run` (no provider-level deny list configured by this runtime) | Container isolation plus your mounted workspace | Depends on upstream/provider-specific capability support |
+
+When running Gemini against untrusted repositories, treat the container boundary as the primary runtime defense. Add external controls (for example, network egress restrictions and tightly scoped credentials) if exfiltration risk is a concern.
 
 ## Troubleshooting
 

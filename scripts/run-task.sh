@@ -288,9 +288,10 @@ if build_execute_url >/dev/null && [ -z "$task_claim_token" ]; then
   exit 1
 fi
 
-result_path="${workspace_root}/task-output/${task_id}/result.md"
-
+validate_task_id "$task_id"
 validate_target_repo "$task_repo"
+
+result_path="${workspace_root}/task-output/${task_id}/result.md"
 
 # Task mode always starts fresh context to avoid cross-task bleed.
 export SESSION_RESUME=0
@@ -301,6 +302,9 @@ unset AGENT_SESSION_KEY || true
 # for dispatch-only agents like "attendant" that have no entry in the repo's
 # hivemoot.yml.  Clear the role so run-once.sh skips role resolution.
 unset HIVEMOOT_BUZZ_ROLE || true
+
+# Mark this run as task-triggered for health reporting.
+export RUN_TRIGGER_TYPE="${RUN_TRIGGER_TYPE:-task}"
 
 # Task mode uses a focused system prompt by default, but preserves an explicit
 # AGENT_PROMPT_FILE override for operators who provide their own system prompt.
@@ -472,10 +476,65 @@ extract_task_result_markdown() {
   esac
 }
 
+# Scans a Codex JSONL log for auth errors and prints a code or description to
+# stdout. Returns 0 if an auth error is found, 1 otherwise.
+#
+# Codex exits 0 even when the API rejects the request with an auth error.
+# Auth failures appear in two shapes depending on Codex version:
+#   - {"type":"error","code":"...","message":"..."} (explicit code field)
+#   - {"type":"error","error":{"code":"...","message":"..."}} (nested code)
+#   - {"type":"error","message":"Unauthorized"} (message only, no code)
+#   - {"type":"turn.failed","error":{"message":"Unauthorized"}} (turn event)
+# Without this check, such runs would be reported as action=complete.
+detect_codex_auth_error() {
+  local log_path="$1"
+  local error_code=""
+
+  [ -f "$log_path" ] || return 1
+
+  error_code="$(jq -Rr '
+    fromjson?
+    | select(.type == "error" or .type == "turn.failed")
+    | (
+        (.error.code // .code) as $code |
+        ((.message // .error.message // "") |
+          if test("Unauthorized|Invalid API key|Incorrect API key"; "i")
+          then "auth_error"
+          else null end) as $msg_code |
+        ($code // $msg_code)
+      )
+    | select(. != null)
+    | select(
+        . == "refresh_token_reused" or
+        . == "invalid_api_key" or
+        . == "token_expired" or
+        . == "auth_error" or
+        startswith("auth_")
+      )
+  ' "$log_path" | head -1)"
+
+  if [ -n "$error_code" ]; then
+    printf '%s\n' "$error_code"
+    return 0
+  fi
+  return 1
+}
+
 provider_name="${AGENT_PROVIDER:-unknown}"
 task_result_markdown=""
 if [ "$run_exit_code" -eq 0 ] && [ -n "$latest_log" ] && [ -f "$latest_log" ]; then
   task_result_markdown="$(extract_task_result_markdown "$provider_name" "$latest_log")"
+fi
+
+# Detect Codex auth errors when exit code is 0 and no successful result was
+# extracted. Codex does not translate API auth errors into non-zero exits.
+auth_error_code=""
+if [ "$run_exit_code" -eq 0 ] && [ "$provider_name" = "codex" ] \
+    && [ -z "$task_result_markdown" ] && [ -n "$latest_log" ]; then
+  if auth_error_code="$(detect_codex_auth_error "$latest_log")"; then
+    log "Codex auth error detected in output: ${auth_error_code}; promoting to failure"
+    run_exit_code=1
+  fi
 fi
 
 complete_payload=""
@@ -515,6 +574,9 @@ mkdir -p "$(dirname "$result_path")"
   elif [ "$run_exit_code" -eq 124 ]; then
     echo
     echo "Execution timed out."
+  elif [ -n "$auth_error_code" ]; then
+    echo
+    echo "Provider authentication failed: ${auth_error_code}"
   else
     echo
     echo "Execution failed."
@@ -545,6 +607,8 @@ if [ "$run_exit_code" -eq 0 ]; then
   post_task_update complete "$result_payload" || true
 elif [ "$run_exit_code" -eq 124 ]; then
   post_task_update timeout "" || true
+elif [ -n "$auth_error_code" ]; then
+  post_task_update fail "Provider authentication failed: ${auth_error_code}" || true
 else
   post_task_update fail "Task execution failed with exit code ${run_exit_code}" || true
 fi
