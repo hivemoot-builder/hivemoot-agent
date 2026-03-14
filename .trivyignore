@@ -1,0 +1,5 @@
+# tar Drive-Relative Symlink Traversal — bundled inside npm 11.11.1 (tar@7.5.9).
+# Drive-relative path attacks are Windows-specific; not exploitable in Linux containers.
+# Remove once npm ships a release bundling tar >= 7.5.11.
+# exp:2026-06-14
+CVE-2026-31802
