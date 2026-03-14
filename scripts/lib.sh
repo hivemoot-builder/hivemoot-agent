@@ -195,6 +195,53 @@ strip_frontmatter() {
   awk 'BEGIN{fm=0} /^---$/ && fm<2 {fm++; next} fm>=2||fm==0{print}' "$file"
 }
 
+# Read a YAML list field from a file's frontmatter block.
+# Prints one item per line, with leading "  - " stripped.
+# Only the first frontmatter block (between the first two --- fences) is parsed.
+# Inline-value keys (field: value) are not supported; only block list form.
+# Usage: read_frontmatter_list <file> <field-name>
+read_frontmatter_list() {
+  local file="$1"
+  local field="$2"
+  awk -v field="$field" '
+    BEGIN { fm=0; in_field=0 }
+    /^---$/ {
+      if (fm < 2) { fm++; in_field=0 }
+      next
+    }
+    fm != 1 { in_field=0; next }
+    $0 == field ":" || substr($0, 1, length(field)+2) == field ": " {
+      in_field=1; next
+    }
+    in_field && /^[[:space:]]+-[[:space:]]/ {
+      sub(/^[[:space:]]+-[[:space:]]*/, ""); print; next
+    }
+    in_field && /^[^[:space:]]/ { in_field=0 }
+  ' "$file"
+}
+
+# Collect all deny-tools entries from SKILL.md frontmatter across a skill list.
+# Prints one tool name per line. Silently skips skills with no deny-tools field.
+# Usage: collect_skill_deny_tools <skills_csv> [skills_dir]
+collect_skill_deny_tools() {
+  local skills_list="$1"
+  local skills_dir="${2:-/opt/hivemoot-agent/skills}"
+
+  [ -z "$skills_list" ] && return 0
+
+  local skill skill_file tool
+  while IFS= read -r skill; do
+    skill="$(trim "$skill")"
+    [ -z "$skill" ] && continue
+    skill_file="${skills_dir}/${skill}/SKILL.md"
+    [ -f "$skill_file" ] || continue
+    while IFS= read -r tool; do
+      [ -z "$tool" ] && continue
+      printf '%s\n' "$tool"
+    done < <(read_frontmatter_list "$skill_file" "deny-tools")
+  done < <(tr ',' '\n' <<< "$skills_list")
+}
+
 ensure_skill_files_exist() {
   local skills_list="$1"
   local skills_dir="${2:-/opt/hivemoot-agent/skills}"

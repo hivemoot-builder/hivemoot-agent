@@ -889,6 +889,19 @@ You are resuming a prior session for this mention thread. Some data in your cont
       "Read(/proc/*/environ)"
     )
 
+    # Merge deny-tools declared in active skill frontmatter into the deny list.
+    # Skills can declare a deny-tools: [Write, Edit, MultiEdit, NotebookEdit]
+    # block in their frontmatter to enforce session-level tool restrictions.
+    # See issue #363 for design rationale and the full tool-name reference.
+    if [ -n "$agent_skills" ]; then
+      _skill_deny_tool=""
+      while IFS= read -r _skill_deny_tool; do
+        [ -z "$_skill_deny_tool" ] && continue
+        claude_disallowed_tools+=("$_skill_deny_tool")
+      done < <(collect_skill_deny_tools "$agent_skills" "/opt/hivemoot-agent/skills")
+      unset _skill_deny_tool
+    fi
+
     # Available skills: Claude-only on-demand plugin dispatch.
     # AGENT_SKILLS are always injected via --append-system-prompt (V1 path above).
     # AGENT_AVAILABLE_SKILLS loads additional skills as native plugins via --plugin-dir

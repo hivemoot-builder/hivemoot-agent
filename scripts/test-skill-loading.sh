@@ -16,7 +16,8 @@ source_lib() {
 
 setup_test_skills() {
   local skills_dir="$1"
-  mkdir -p "${skills_dir}/skill-one" "${skills_dir}/skill-two" "${skills_dir}/with-divider" "${skills_dir}/no-frontmatter"
+  mkdir -p "${skills_dir}/skill-one" "${skills_dir}/skill-two" "${skills_dir}/with-divider" \
+           "${skills_dir}/no-frontmatter" "${skills_dir}/with-deny-tools" "${skills_dir}/deny-partial"
 
   cat > "${skills_dir}/skill-one/SKILL.md" <<'EOF'
 ---
@@ -56,6 +57,33 @@ EOF
 # Plain Skill
 
 No frontmatter here.
+EOF
+
+  cat > "${skills_dir}/with-deny-tools/SKILL.md" <<'EOF'
+---
+name: with-deny-tools
+description: Skill that restricts write tools
+deny-tools:
+  - Write
+  - Edit
+  - MultiEdit
+  - NotebookEdit
+---
+# Read-Only Skill
+
+This skill declares deny-tools restrictions.
+EOF
+
+  cat > "${skills_dir}/deny-partial/SKILL.md" <<'EOF'
+---
+name: deny-partial
+description: Skill with one deny-tool
+deny-tools:
+  - Write
+---
+# Partial Deny Skill
+
+This skill denies only Write.
 EOF
 }
 
@@ -556,6 +584,162 @@ test_generate_claude_plugin_dir_cp_failure() {
   echo "  ✓ generate_claude_plugin_dir fails closed and cleans up on cp failure"
 }
 
+test_read_frontmatter_list() {
+  echo "Testing read_frontmatter_list..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  trap 'if [ -n "${tmp_dir:-}" ]; then rm -rf "$tmp_dir"; fi' EXIT
+
+  source_lib
+
+  # File with a deny-tools list in frontmatter
+  local skill_file="${tmp_dir}/SKILL.md"
+  cat > "$skill_file" <<'EOF'
+---
+name: test-skill
+description: A test skill
+deny-tools:
+  - Write
+  - Edit
+  - MultiEdit
+---
+# Body
+EOF
+
+  local result
+  result="$(read_frontmatter_list "$skill_file" "deny-tools")"
+
+  if [[ "$result" != *"Write"* ]]; then
+    fail "read_frontmatter_list should return Write"
+  fi
+  if [[ "$result" != *"Edit"* ]]; then
+    fail "read_frontmatter_list should return Edit"
+  fi
+  if [[ "$result" != *"MultiEdit"* ]]; then
+    fail "read_frontmatter_list should return MultiEdit"
+  fi
+
+  # Field not present returns empty
+  local empty_result
+  empty_result="$(read_frontmatter_list "$skill_file" "nonexistent-field")"
+  if [ -n "$empty_result" ]; then
+    fail "read_frontmatter_list should return empty for a missing field"
+  fi
+
+  # File with no frontmatter returns empty
+  local no_fm="${tmp_dir}/no-fm.md"
+  cat > "$no_fm" <<'EOF'
+# Just body
+
+No frontmatter here.
+EOF
+  empty_result="$(read_frontmatter_list "$no_fm" "deny-tools")"
+  if [ -n "$empty_result" ]; then
+    fail "read_frontmatter_list should return empty for a file with no frontmatter"
+  fi
+
+  # Body content after frontmatter must not bleed into field output
+  local body_check="${tmp_dir}/body-check.md"
+  cat > "$body_check" <<'EOF'
+---
+name: check
+deny-tools:
+  - Write
+---
+# Body
+
+  - NotAnEntry
+EOF
+  result="$(read_frontmatter_list "$body_check" "deny-tools")"
+  if [[ "$result" == *"NotAnEntry"* ]]; then
+    fail "read_frontmatter_list must not read body list items as frontmatter entries"
+  fi
+  if [[ "$result" != *"Write"* ]]; then
+    fail "read_frontmatter_list should still return Write from body-check file"
+  fi
+
+  echo "  ✓ read_frontmatter_list parses deny-tools correctly"
+}
+
+test_collect_skill_deny_tools() {
+  echo "Testing collect_skill_deny_tools..."
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  trap 'if [ -n "${tmp_dir:-}" ]; then rm -rf "$tmp_dir"; fi' EXIT
+
+  setup_test_skills "$tmp_dir"
+  source_lib
+
+  # Skill with deny-tools returns all entries
+  local result
+  result="$(collect_skill_deny_tools "with-deny-tools" "$tmp_dir")"
+  if [[ "$result" != *"Write"* ]]; then
+    fail "collect_skill_deny_tools should return Write from with-deny-tools"
+  fi
+  if [[ "$result" != *"Edit"* ]]; then
+    fail "collect_skill_deny_tools should return Edit from with-deny-tools"
+  fi
+  if [[ "$result" != *"MultiEdit"* ]]; then
+    fail "collect_skill_deny_tools should return MultiEdit from with-deny-tools"
+  fi
+  if [[ "$result" != *"NotebookEdit"* ]]; then
+    fail "collect_skill_deny_tools should return NotebookEdit from with-deny-tools"
+  fi
+
+  # Skill without deny-tools returns empty
+  local empty_result
+  empty_result="$(collect_skill_deny_tools "skill-one" "$tmp_dir")"
+  if [ -n "$empty_result" ]; then
+    fail "collect_skill_deny_tools should return empty for a skill with no deny-tools"
+  fi
+
+  # Multiple skills: union of all deny-tools (may include duplicates)
+  result="$(collect_skill_deny_tools "with-deny-tools,deny-partial" "$tmp_dir")"
+  local write_count
+  write_count="$(printf '%s\n' "$result" | grep -c '^Write$' || true)"
+  if [ "$write_count" -lt 1 ]; then
+    fail "collect_skill_deny_tools multi-skill should include Write (got: $result)"
+  fi
+
+  # Empty skill list returns empty
+  empty_result="$(collect_skill_deny_tools "" "$tmp_dir")"
+  if [ -n "$empty_result" ]; then
+    fail "collect_skill_deny_tools should return empty for empty skill list"
+  fi
+
+  # Body content of skill must not appear as deny-tool entries
+  if [[ "$result" == *"Read-Only Skill"* ]]; then
+    fail "collect_skill_deny_tools must not return body content as tool names"
+  fi
+
+  echo "  ✓ collect_skill_deny_tools merges deny-tools from skill frontmatter correctly"
+}
+
+test_security_reviewer_deny_tools() {
+  echo "Testing shipped security-reviewer deny-tools..."
+
+  source_lib
+
+  local skills_dir="${SCRIPT_DIR}/../skills"
+  local result
+  result="$(collect_skill_deny_tools "security-reviewer" "$skills_dir")"
+
+  for tool in Write Edit MultiEdit NotebookEdit; do
+    if [[ "$result" != *"$tool"* ]]; then
+      fail "security-reviewer deny-tools should include ${tool} (got: $result)"
+    fi
+  done
+
+  # Body content must not bleed through
+  if [[ "$result" == *"Risk"* ]] || [[ "$result" == *"##"* ]]; then
+    fail "collect_skill_deny_tools must not return body content from security-reviewer"
+  fi
+
+  echo "  ✓ security-reviewer declares correct deny-tools"
+}
+
 echo "Running skill loading tests..."
 echo
 
@@ -573,6 +757,9 @@ test_shipped_skills_load
 test_generate_claude_plugin_dir_basic
 test_generate_claude_plugin_dir_all_mode
 test_generate_claude_plugin_dir_cp_failure
+test_read_frontmatter_list
+test_collect_skill_deny_tools
+test_security_reviewer_deny_tools
 
 echo
 echo "All skill loading tests passed!"

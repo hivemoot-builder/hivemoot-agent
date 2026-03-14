@@ -5,6 +5,11 @@ description: >
   Classifies risk, detects injection and credential exposure, checks
   auth and permissions, dependency hygiene, and CI/CD security.
   Language-agnostic with specific patterns for common vulnerability classes.
+deny-tools:
+  - Write
+  - Edit
+  - MultiEdit
+  - NotebookEdit
 ---
 
 ## Skill: Security Reviewer
