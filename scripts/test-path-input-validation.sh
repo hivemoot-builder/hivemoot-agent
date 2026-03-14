@@ -103,13 +103,13 @@ assert_fails_with \
     AGENT_ID_02=worker AGENT_GITHUB_TOKEN_02=dummy bash scripts/run-loop.sh
 
 assert_fails_with \
-  "AGENT_ID_02 is required when AGENT_GITHUB_TOKEN_02 or AGENT_GITHUB_TOKEN_02_FILE is set." \
+  "AGENT_ID_02 is required when AGENT_GITHUB_TOKEN_02, AGENT_GITHUB_TOKEN_02_FILE, or AGENT_SKILLS_02 is set." \
   env TARGET_REPO=owner/repo \
     AGENT_ID_01=worker AGENT_GITHUB_TOKEN_01=dummy \
     AGENT_GITHUB_TOKEN_02=dummy bash scripts/run-multi.sh
 
 assert_fails_with \
-  "AGENT_ID_02 is required when AGENT_GITHUB_TOKEN_02 or AGENT_GITHUB_TOKEN_02_FILE is set." \
+  "AGENT_ID_02 is required when AGENT_GITHUB_TOKEN_02, AGENT_GITHUB_TOKEN_02_FILE, or AGENT_SKILLS_02 is set." \
   env TARGET_REPO=owner/repo \
     AGENT_ID_01=worker AGENT_GITHUB_TOKEN_01=dummy \
     AGENT_GITHUB_TOKEN_02=dummy bash scripts/run-loop.sh
