@@ -198,11 +198,21 @@ strip_frontmatter() {
 # Read a YAML list field from a file's frontmatter block.
 # Prints one item per line, with leading "  - " stripped.
 # Only the first frontmatter block (between the first two --- fences) is parsed.
-# Inline-value keys (field: value) are not supported; only block list form.
+# Inline-value keys (field: [a, b]) are not supported; only block list form.
+# Emits a warning to stderr when inline form is detected so authors are notified.
 # Usage: read_frontmatter_list <file> <field-name>
 read_frontmatter_list() {
   local file="$1"
   local field="$2"
+  # Detect inline YAML form (field: value on same line) and warn — block list only.
+  if awk -v f="$field" '
+    BEGIN { fm=0; found=0 }
+    /^---$/ { if (fm < 2) fm++; next }
+    fm == 1 && index($0, f ": ") == 1 && length($0) > length(f) + 2 { found=1 }
+    END { exit !found }
+  ' "$file" 2>/dev/null; then
+    echo "read_frontmatter_list: '${field}' in '${file}' uses inline YAML form, which is not supported. Use block list syntax (  - item). No entries will be collected." >&2
+  fi
   awk -v field="$field" '
     BEGIN { fm=0; in_field=0 }
     /^---$/ {
@@ -221,7 +231,8 @@ read_frontmatter_list() {
 }
 
 # Collect all deny-tools entries from SKILL.md frontmatter across a skill list.
-# Prints one tool name per line. Silently skips skills with no deny-tools field.
+# Prints one tool name per line, deduplicated. Silently skips skills with no deny-tools field.
+# Note: deny-tools enforcement is Claude-only; other providers ignore this field at runtime.
 # Usage: collect_skill_deny_tools <skills_csv> [skills_dir]
 collect_skill_deny_tools() {
   local skills_list="$1"
@@ -230,16 +241,18 @@ collect_skill_deny_tools() {
   [ -z "$skills_list" ] && return 0
 
   local skill skill_file tool
-  while IFS= read -r skill; do
-    skill="$(trim "$skill")"
-    [ -z "$skill" ] && continue
-    skill_file="${skills_dir}/${skill}/SKILL.md"
-    [ -f "$skill_file" ] || continue
-    while IFS= read -r tool; do
-      [ -z "$tool" ] && continue
-      printf '%s\n' "$tool"
-    done < <(read_frontmatter_list "$skill_file" "deny-tools")
-  done < <(tr ',' '\n' <<< "$skills_list")
+  {
+    while IFS= read -r skill; do
+      skill="$(trim "$skill")"
+      [ -z "$skill" ] && continue
+      skill_file="${skills_dir}/${skill}/SKILL.md"
+      [ -f "$skill_file" ] || continue
+      while IFS= read -r tool; do
+        [ -z "$tool" ] && continue
+        printf '%s\n' "$tool"
+      done < <(read_frontmatter_list "$skill_file" "deny-tools")
+    done < <(tr ',' '\n' <<< "$skills_list")
+  } | sort -u
 }
 
 ensure_skill_files_exist() {

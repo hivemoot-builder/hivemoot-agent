@@ -656,6 +656,18 @@ claude_active_session_created_epoch=""
 claude_used_resume=0
 claude_fresh_cmd=()
 claude_resume_supported=0
+# Warn if skills declare deny-tools but the provider is not Claude.
+# deny-tools frontmatter is only enforced in Claude sessions via --disallowedTools;
+# other providers silently ignore it, which can mislead operators expecting write protection.
+if [ -n "$agent_skills" ] && [ "$provider" != "claude" ]; then
+  _deny_warn=""
+  _deny_warn="$(collect_skill_deny_tools "$agent_skills" "/opt/hivemoot-agent/skills" 2>/dev/null)"
+  if [ -n "$_deny_warn" ]; then
+    echo "Warning: AGENT_SKILLS declares deny-tools (${_deny_warn//$'\n'/, }) but AGENT_PROVIDER=${provider} — deny-tools enforcement is Claude-only and will not be applied." >&2
+  fi
+  unset _deny_warn
+fi
+
 case "$provider" in
   codex)
     if ! command -v codex >/dev/null 2>&1; then

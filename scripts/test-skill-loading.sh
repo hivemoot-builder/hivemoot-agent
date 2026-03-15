@@ -659,6 +659,27 @@ EOF
     fail "read_frontmatter_list should still return Write from body-check file"
   fi
 
+  # Inline YAML form produces no output and emits a warning to stderr
+  local inline_file="${tmp_dir}/inline.md"
+  cat > "$inline_file" <<'EOF'
+---
+name: inline
+deny-tools: [Write, Edit]
+---
+# Inline Skill
+EOF
+  local inline_out inline_err inline_err_file
+  inline_err_file="$(mktemp)"
+  inline_out="$(read_frontmatter_list "$inline_file" "deny-tools" 2>"$inline_err_file")"
+  inline_err="$(cat "$inline_err_file")"
+  rm -f "$inline_err_file"
+  if [ -n "$inline_out" ]; then
+    fail "read_frontmatter_list should return empty for inline YAML form (got: $inline_out)"
+  fi
+  if [[ "$inline_err" != *"inline YAML"* ]]; then
+    fail "read_frontmatter_list should warn about inline YAML form (got stderr: $inline_err)"
+  fi
+
   echo "  ✓ read_frontmatter_list parses deny-tools correctly"
 }
 
@@ -695,12 +716,12 @@ test_collect_skill_deny_tools() {
     fail "collect_skill_deny_tools should return empty for a skill with no deny-tools"
   fi
 
-  # Multiple skills: union of all deny-tools (may include duplicates)
+  # Multiple skills: union of all deny-tools, deduplicated (Write appears in both skills)
   result="$(collect_skill_deny_tools "with-deny-tools,deny-partial" "$tmp_dir")"
   local write_count
   write_count="$(printf '%s\n' "$result" | grep -c '^Write$' || true)"
-  if [ "$write_count" -lt 1 ]; then
-    fail "collect_skill_deny_tools multi-skill should include Write (got: $result)"
+  if [ "$write_count" -ne 1 ]; then
+    fail "collect_skill_deny_tools multi-skill should include Write exactly once after deduplication (got count=${write_count}, result: $result)"
   fi
 
   # Empty skill list returns empty
