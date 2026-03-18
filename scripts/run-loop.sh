@@ -143,83 +143,14 @@ done
 # ── Preflight ──────────────────────────────────────────────────────
 
 preflight_check() {
-  local failures=0
-
-  log "Pre-flight: validating configuration"
-
   local provider="${AGENT_PROVIDER:-claude}"
   local auth_mode="${AGENT_AUTH_MODE:-auto}"
   local prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/system/autonomous.md}"
 
-  if ! command -v "$provider" >/dev/null 2>&1; then
-    echo "Pre-flight: ${provider} CLI is not installed." >&2
-    failures=$((failures + 1))
-  fi
-
-  if ! command -v hivemoot >/dev/null 2>&1; then
-    echo "Pre-flight: hivemoot CLI is not installed." >&2
-    failures=$((failures + 1))
-  fi
-
-  if [ ! -f "$prompt_file" ]; then
-    echo "Pre-flight: prompt file not found: ${prompt_file}" >&2
-    failures=$((failures + 1))
-  else
-    if ! resolve_companion_base_prompt "$prompt_file" >/dev/null; then
-      if prompt_requires_companion_base "$prompt_file"; then
-        echo "Pre-flight: base prompt file not found: $(dirname "$prompt_file")/base.md" >&2
-        failures=$((failures + 1))
-      fi
-    fi
-  fi
-
-  # Skill files exist
-  local skill_failures=0
-  preflight_check_agent_skill_lists "/opt/hivemoot-agent/skills" || skill_failures=$?
-  failures=$((failures + skill_failures))
-
-  # Provider auth check
-  local auth_failures=0
-  preflight_check_provider_auth "$provider" "$auth_mode" || auth_failures=$?
-  failures=$((failures + auth_failures))
-
-  # Validate agent tokens against GitHub API
-  for index in "${!agent_ids[@]}"; do
-    local aid="${agent_ids[$index]}"
-    local tok="${agent_tokens[$index]}"
-
-    if [ "$watch_mentions" = "1" ]; then
-      # Mention watching requires user tokens (for notifications API)
-      if ! GH_TOKEN="$tok" gh api user --jq .login >/dev/null 2>&1; then
-        echo "Pre-flight: token for agent '${aid}' is not a valid user token (required for WATCH_MENTIONS=1)." >&2
-        failures=$((failures + 1))
-        continue
-      fi
-    else
-      # Periodic-only mode accepts both user and installation tokens
-      if ! GH_TOKEN="$tok" gh api user --jq .login >/dev/null 2>&1; then
-        if ! GH_TOKEN="$tok" gh api installation --jq .id >/dev/null 2>&1; then
-          echo "Pre-flight: token for agent '${aid}' is invalid or expired." >&2
-          failures=$((failures + 1))
-          continue
-        fi
-      fi
-    fi
-
-    if [ -n "$target_repo" ]; then
-      if ! GH_TOKEN="$tok" gh api "repos/${target_repo}" --jq .full_name >/dev/null 2>&1; then
-        echo "Pre-flight: token for agent '${aid}' cannot access ${target_repo}." >&2
-        failures=$((failures + 1))
-      fi
-    fi
-  done
-
-  if [ "$failures" -gt 0 ]; then
-    echo "Pre-flight: ${failures} check(s) failed." >&2
-    exit 1
-  fi
-
-  log "Pre-flight: all checks passed (agents=${agent_count} repo=${target_repo:-unset})"
+  preflight_check_common \
+    "$provider" "$auth_mode" "$prompt_file" \
+    "$target_repo" "$watch_mentions" "1" \
+    "/opt/hivemoot-agent/skills" || exit 1
 }
 
 preflight_check
