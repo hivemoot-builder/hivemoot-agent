@@ -83,7 +83,7 @@ No prompting. No supervision. They're your teammates — they figure out what ne
 | **Providers** | Claude, Codex, Gemini, Kilo, OpenCode — swap via `.env` |
 | **Agents** | Up to 10 identities running in parallel per container |
 | **Isolation** | Each agent gets its own clone, credentials, logs, home dir |
-| **Scheduling** | One-shot or loop mode with jitter, backoff, mention watching |
+| **Scheduling** | One-shot or loop mode with jitter, backoff, mention and review-request watching |
 | **Security** | Per-run secret mounts, Trivy scanning, ShellCheck, Hadolint |
 
 ## Getting Started
@@ -310,7 +310,7 @@ What it does:
 - Applies worker hardening flags (`--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--read-only`, tmpfs mounts, resource limits).
 - Enforces per-repo mutual exclusion with `flock` plus a controller-local worker cap (`CONTROLLER_MAX_WORKERS`, locks default under `/tmp/hivemoot-controller-locks`).
 - Optionally enforces a host-wide worker cap across multiple controller services with a shared flock semaphore (`GLOBAL_MAX_WORKERS` + `GLOBAL_SLOTS_DIR`).
-- Supports mention-triggered jobs (`WATCH_MENTIONS=1`) via a filesystem queue under `queue/` and per-agent watch state under `watch-state/`.
+- Supports mention-triggered jobs (`WATCH_MENTIONS=1`) and review-request jobs (`WATCH_REVIEW_REQUESTS=1`) via a filesystem queue under `queue/` and per-agent watch state under `watch-state/`.
 - Supports delegated task watching (`WATCH_TASKS=1`) by polling `AGENT_TASK_CLAIM_URL` and spawning one-shot `RUN_MODE=task` workers with claimed `task_id/prompt/repo`.
 - Defers mention acknowledgment until the spawned worker job succeeds.
 - Writes per-job artifacts:
