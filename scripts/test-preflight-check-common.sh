@@ -167,6 +167,7 @@ test_requires_hivemoot_cli_when_flag_set() {
   # Stub hivemoot to not exist in the search path used by preflight_check_common.
   # We override command -v to report hivemoot as missing.
   command() {
+    # shellcheck disable=SC2317  # invoked indirectly via override of the command builtin
     if [ "${1:-}" = "-v" ] && [ "${2:-}" = "hivemoot" ]; then return 1; fi
     builtin command "$@"
   }
@@ -196,6 +197,7 @@ test_does_not_require_hivemoot_cli_when_flag_unset() {
 
   # Stub hivemoot to not exist; should not matter when require_hivemoot=0.
   command() {
+    # shellcheck disable=SC2317  # invoked indirectly via override of the command builtin
     if [ "${1:-}" = "-v" ] && [ "${2:-}" = "hivemoot" ]; then return 1; fi
     builtin command "$@"
   }
