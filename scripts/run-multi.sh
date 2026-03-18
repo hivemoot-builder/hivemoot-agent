@@ -109,68 +109,11 @@ preflight_check() {
   local provider="${AGENT_PROVIDER:-claude}"
   local auth_mode="${AGENT_AUTH_MODE:-auto}"
   local prompt_file="${AGENT_PROMPT_FILE:-/opt/hivemoot-agent/prompts/system/autonomous.md}"
-  local failures=0
 
-  log "Pre-flight: validating configuration"
-
-  # Provider CLI installed
-  if ! command -v "$provider" >/dev/null 2>&1; then
-    echo "Pre-flight: ${provider} CLI is not installed in the container." >&2
-    failures=$((failures + 1))
-  fi
-
-  if [ ! -f "$prompt_file" ]; then
-    echo "Pre-flight: prompt file not found: ${prompt_file}" >&2
-    failures=$((failures + 1))
-  else
-    # Built-in prompts require the shared base prompt; standalone custom
-    # prompts remain valid without a sibling base.md.
-    if ! resolve_companion_base_prompt "$prompt_file" >/dev/null; then
-      if prompt_requires_companion_base "$prompt_file"; then
-        echo "Pre-flight: base prompt file not found: $(dirname "$prompt_file")/base.md" >&2
-        failures=$((failures + 1))
-      fi
-    fi
-  fi
-
-  # Skill files exist
-  local skill_failures=0
-  preflight_check_agent_skill_lists "/opt/hivemoot-agent/skills" || skill_failures=$?
-  failures=$((failures + skill_failures))
-
-  # Provider auth check
-  local auth_failures=0
-  preflight_check_provider_auth "$provider" "$auth_mode" || auth_failures=$?
-  failures=$((failures + auth_failures))
-
-  # Validate ALL agent tokens against GitHub API
-  local index
-  for index in "${!agent_ids[@]}"; do
-    local aid="${agent_ids[$index]}"
-    local tok="${agent_tokens[$index]}"
-
-    if ! GH_TOKEN="$tok" gh api user --jq .login >/dev/null 2>&1; then
-      if ! GH_TOKEN="$tok" gh api installation --jq .id >/dev/null 2>&1; then
-        echo "Pre-flight: token for agent '${aid}' is invalid or expired." >&2
-        failures=$((failures + 1))
-        continue
-      fi
-    fi
-
-    if [ -n "$target_repo" ]; then
-      if ! GH_TOKEN="$tok" gh api "repos/${target_repo}" --jq .full_name >/dev/null 2>&1; then
-        echo "Pre-flight: token for agent '${aid}' cannot access ${target_repo}." >&2
-        failures=$((failures + 1))
-      fi
-    fi
-  done
-
-  if [ "$failures" -gt 0 ]; then
-    echo "Pre-flight: ${failures} check(s) failed. Fix the above errors and retry." >&2
-    exit 1
-  fi
-
-  log "Pre-flight: all checks passed (provider=${provider} auth=${auth_mode} repo=${target_repo} agents=${#agent_ids[@]})"
+  preflight_check_common \
+    "$provider" "$auth_mode" "$prompt_file" \
+    "$target_repo" "0" "0" \
+    "/opt/hivemoot-agent/skills" || exit 1
 }
 
 preflight_check
