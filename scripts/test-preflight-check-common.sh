@@ -169,6 +169,7 @@ test_requires_hivemoot_cli_when_flag_set() {
   command() {
     # shellcheck disable=SC2317  # invoked indirectly via override of the command builtin
     if [ "${1:-}" = "-v" ] && [ "${2:-}" = "hivemoot" ]; then return 1; fi
+    # shellcheck disable=SC2317
     builtin command "$@"
   }
 
@@ -199,6 +200,7 @@ test_does_not_require_hivemoot_cli_when_flag_unset() {
   command() {
     # shellcheck disable=SC2317  # invoked indirectly via override of the command builtin
     if [ "${1:-}" = "-v" ] && [ "${2:-}" = "hivemoot" ]; then return 1; fi
+    # shellcheck disable=SC2317
     builtin command "$@"
   }
 
