@@ -753,6 +753,7 @@ preflight_check_common() {
   failures=$((failures + auth_failures))
 
   local index
+  # shellcheck disable=SC2154  # agent_ids and agent_tokens are globals set by callers
   for index in "${!agent_ids[@]}"; do
     local aid="${agent_ids[$index]}"
     local tok="${agent_tokens[$index]}"
