@@ -56,6 +56,10 @@ load_lib() {
   local workdir="$1"
   local mock_bin="${workdir}/mock-bin"
 
+  # Force a fresh load even if HIVEMOOT_LIB_LOADED is set in the caller's
+  # environment; without this the guard in lib.sh returns early and
+  # preflight_check_common is never defined.
+  unset HIVEMOOT_LIB_LOADED
   # shellcheck source=scripts/lib.sh
   . "${SCRIPT_DIR}/lib.sh"
 
