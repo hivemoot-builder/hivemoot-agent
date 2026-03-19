@@ -72,6 +72,7 @@ load_lib() {
   preflight_check_agent_skill_lists() { return 0; }
 
   export PATH="${mock_bin}:${PATH}"
+  hash -r
 }
 
 # Minimal global arrays consumed by preflight_check_common.
