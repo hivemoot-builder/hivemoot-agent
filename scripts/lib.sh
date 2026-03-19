@@ -783,7 +783,7 @@ preflight_check_common() {
   done
 
   if [ "$failures" -gt 0 ]; then
-    echo "Pre-flight: ${failures} check(s) failed." >&2
+    echo "Pre-flight: ${failures} check(s) failed. Fix the above errors and retry." >&2
     return 1
   fi
 
