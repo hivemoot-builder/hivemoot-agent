@@ -122,6 +122,9 @@ test_fails_missing_provider_cli() {
   if ! echo "$stderr_out" | grep -q "CLI is not installed"; then
     fail "expected 'CLI is not installed' in stderr; got: ${stderr_out}"
   fi
+  if ! echo "$stderr_out" | grep -q "Fix the above errors and retry"; then
+    fail "expected retry guidance in stderr; got: ${stderr_out}"
+  fi
   if preflight_check_common \
       "no-such-provider-xyz" "auto" "${workdir}/prompt.md" \
       "" "0" "0" \
