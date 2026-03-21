@@ -1308,6 +1308,7 @@ handle_shutdown() {
   stop_schedulers
   stop_watchers
   stop_controller_workers
+  stop_job_subshells
 }
 
 stop_job_subshells() {
