@@ -1313,6 +1313,7 @@ handle_shutdown() {
 
 stop_job_subshells() {
   local pid=""
+  local exit_code=0
 
   if [ "${#running_pids[@]}" -gt 0 ]; then
     log "Stopping ${#running_pids[@]} tracked job subshell(s)"
@@ -1323,7 +1324,15 @@ stop_job_subshells() {
   done
 
   for pid in "${running_pids[@]}"; do
-    wait "$pid" 2>/dev/null || true
+    if wait "$pid" 2>/dev/null; then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
+    # Clean up queue artifacts (.processing files) for subshells terminated
+    # mid-flight. Without this, killed subshells leave .processing files that
+    # never transition to .done/.failed, causing queue corruption.
+    record_job_completion "$pid" "$exit_code"
   done
 
   running_pids=()
