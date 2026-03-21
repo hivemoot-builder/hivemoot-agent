@@ -11,6 +11,12 @@ log() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
+# shellcheck source=scripts/lib-global-slots.sh
+. "${SCRIPT_DIR}/lib-global-slots.sh"
+# shellcheck source=scripts/lib-slots.sh
+. "${SCRIPT_DIR}/lib-slots.sh"
+# shellcheck source=scripts/lib-classify.sh
+. "${SCRIPT_DIR}/lib-classify.sh"
 # shellcheck source=scripts/health-reporter.sh
 . "${SCRIPT_DIR}/health-reporter.sh"
 
@@ -137,6 +143,43 @@ updated_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 EOF_SUMMARY
 }
 
+global_slot_timeout_for_trigger() {
+  local trigger_type="$1"
+
+  case "$trigger_type" in
+    periodic)
+      printf '%s' "$global_slot_timeout_periodic_secs"
+      ;;
+    mention)
+      printf '%s' "$global_slot_timeout_mention_secs"
+      ;;
+    task)
+      printf '%s' "$global_slot_timeout_task_secs"
+      ;;
+    *)
+      printf '0'
+      ;;
+  esac
+}
+
+mark_global_slot_timeout() {
+  local job_run_dir="$1"
+  local timeout_secs="$2"
+  local marker_file="${job_run_dir}/global-slot-timeout"
+
+  mkdir -p "$job_run_dir"
+  cat > "$marker_file" <<EOF_TIMEOUT
+timeout_secs=${timeout_secs}
+EOF_TIMEOUT
+  chmod 600 "$marker_file" 2>/dev/null || true
+}
+
+read_global_slot_timeout_secs() {
+  local marker_file="$1"
+
+  awk -F= '/^timeout_secs=/{print $2; exit}' "$marker_file" 2>/dev/null || true
+}
+
 append_env_if_set() {
   local var_name="$1"
   local value="${!var_name:-}"
@@ -226,23 +269,43 @@ cleanup_job_home_credentials() {
   rmdir "${gemini_auth_dir}" 2>/dev/null || true
 }
 
+# Classify a task failure from the worker container log.
+# Delegates to the shared classify_run_failure_from_file() from lib-classify.sh,
+# which owns the single authoritative pattern table for run-once.sh errors.
+classify_worker_log_failure() {
+  classify_run_failure_from_file "$1"
+}
+
 # POST action=fail to the task execute endpoint from the controller.
 # Safety net for crashes/OOM where run-task.sh exits before self-reporting.
 # Best-effort: errors are logged but never affect the caller's flow.
+#
+# $1 — task_id
+# $2 — exit_code
+# $3 — optional classified error message (from classify_worker_log_failure);
+#      falls back to generic "Worker exited with code N" when empty.
 #
 # Requires globals: task_execute_base_url, task_executor_token
 report_task_failure_from_controller() {
   local task_id="$1"
   local exit_code="$2"
+  local classified_error="${3:-}"
   local url=""
+  local error_msg=""
   local payload=""
 
   if [ -z "${task_execute_base_url:-}" ] || [ -z "${task_executor_token:-}" ]; then
     return 0
   fi
 
+  if [ -n "$classified_error" ]; then
+    error_msg="${classified_error} (exit code ${exit_code})"
+  else
+    error_msg="Worker exited with code ${exit_code}"
+  fi
+
   url="${task_execute_base_url%/}/${task_id}/execute"
-  payload="$(jq -cn --arg action "fail" --arg error "Worker exited with code ${exit_code}" \
+  payload="$(jq -cn --arg action "fail" --arg error "$error_msg" \
     '{action: $action, error: $error}')"
 
   curl -sf -X POST "$url" \
@@ -293,7 +356,7 @@ spawn_worker() {
     --read-only
     --tmpfs "/tmp:size=2g,mode=1777"
     --memory "${AGENT_MEMORY_LIMIT:-16g}"
-    --cpus "${AGENT_CPU_LIMIT:-4.0}"
+    --cpus "${AGENT_CPU_LIMIT:-2.0}"
     --pids-limit "${AGENT_PIDS_LIMIT:-512}"
     -v "${job_workspace}:/workspace"
     -v "${shared_git_cache_root}:${worker_git_cache_dir}"
@@ -496,6 +559,9 @@ queue_has_ack_key() {
   local ack_key_marker=""
   local existing_file=""
   local existing_ack_key=""
+  local now=0
+  local mtime=0
+  local age_secs=0
   local -a existing_files=()
 
   if [ -z "$ack_key" ]; then
@@ -505,10 +571,21 @@ queue_has_ack_key() {
 
   shopt -s nullglob
   existing_files=("${queue_root}"/*.trigger.json "${queue_root}"/*.processing "${queue_root}"/*.done)
+  if [ "$watch_trigger_failure_backoff_secs" -gt 0 ]; then
+    existing_files+=("${queue_root}"/*.failed)
+    now="$(date +%s)"
+  fi
   shopt -u nullglob
 
   for existing_file in "${existing_files[@]}"; do
     [ -f "$existing_file" ] || continue
+    if [[ "$existing_file" == *.failed ]]; then
+      mtime="$(file_mtime_epoch "$existing_file" "$now")"
+      age_secs=$((now - mtime))
+      if [ "$age_secs" -gt "$watch_trigger_failure_backoff_secs" ]; then
+        continue
+      fi
+    fi
     # Fast-path: skip jq parse for files that cannot contain this ack key.
     if ! grep -Fq "$ack_key_marker" "$existing_file"; then
       continue
@@ -1207,13 +1284,6 @@ stop_controller_workers() {
   "$docker_cmd" stop --time "$shutdown_grace_secs" "${container_ids[@]}" >/dev/null 2>&1 || true
 }
 
-cleanup_temp_tokens() {
-  local path=""
-  for path in "${temp_token_files[@]}"; do
-    rm -f "$path" 2>/dev/null || true
-  done
-}
-
 stop_schedulers() {
   local pid=""
 
@@ -1278,6 +1348,8 @@ record_job_completion() {
   local ack_key="${pid_to_ack_key[$pid]:-}"
   local state_file="${pid_to_state_file[$pid]:-}"
   local processing_file="${pid_to_processing_file[$pid]:-}"
+  local global_slot_timeout_file="${runs_root}/${job_id}/global-slot-timeout"
+  local global_slot_timeout_secs=""
   local final_file=""
   local final_state="failed"
   local ack_successful=0
@@ -1290,6 +1362,37 @@ record_job_completion() {
     "pid_to_ack_key[$pid]" \
     "pid_to_state_file[$pid]" \
     "pid_to_processing_file[$pid]"
+
+  if [ -f "$global_slot_timeout_file" ]; then
+    global_slot_timeout_secs="$(read_global_slot_timeout_secs "$global_slot_timeout_file")"
+    [ -n "$global_slot_timeout_secs" ] || global_slot_timeout_secs="unknown"
+
+    case "$trigger_type" in
+      mention)
+        if [ -n "$processing_file" ] && [ -f "$processing_file" ]; then
+          final_file="${processing_file%.processing}.trigger.json"
+          mv -f "$processing_file" "$final_file" 2>/dev/null || true
+        fi
+        log "Global slot timeout (${global_slot_timeout_secs}s); re-queued mention trigger: id=${job_id} repo=${repo} agent=${agent_id}"
+        ;;
+      periodic)
+        if [ -n "$processing_file" ] && [ -f "$processing_file" ]; then
+          final_file="${processing_file%.processing}.done"
+          mv -f "$processing_file" "$final_file" 2>/dev/null || true
+        fi
+        log "Global slot timeout (${global_slot_timeout_secs}s); skipping periodic trigger: id=${job_id} repo=${repo} agent=${agent_id}"
+        ;;
+      task)
+        log "Global slot timeout (${global_slot_timeout_secs}s); skipping task trigger: id=${job_id} repo=${repo} agent=${agent_id}"
+        ;;
+      *)
+        log "Global slot timeout (${global_slot_timeout_secs}s): id=${job_id} repo=${repo} agent=${agent_id} trigger=${trigger_type}"
+        ;;
+    esac
+
+    rm -f "$global_slot_timeout_file" 2>/dev/null || true
+    return 0
+  fi
 
   if [ "$exit_code" -eq 0 ]; then
     if [ "$trigger_type" = "mention" ] && [ -n "$ack_key" ] && [ -n "$state_file" ]; then
@@ -1396,6 +1499,7 @@ run_job() {
   local log_follow_deadline=0
   local task_messages_file=""
   local task_messages_host_path=""
+  local global_slot_timeout_secs=0
 
   if [ -z "$repo_lock_file" ]; then
     ensure_agent_lock_file "$repo" "$agent_id"
@@ -1413,12 +1517,27 @@ run_job() {
   write_job_spec "$job_spec_file" "$job_id" "$repo" "$agent_id" "$trigger_type" "$agent_timeout_seconds"
   write_job_status "$job_workspace" "$job_id" "$repo" "$agent_id" "$trigger_type" "queued" "-"
 
+  global_slot_timeout_secs="$(global_slot_timeout_for_trigger "$trigger_type")"
+  if ! acquire_global_slot "$global_slot_timeout_secs"; then
+    mark_global_slot_timeout "$job_run_dir" "$global_slot_timeout_secs"
+    write_job_status "$job_workspace" "$job_id" "$repo" "$agent_id" "$trigger_type" "failed" "$global_slot_timeout_exit_code"
+    if [ "$trigger_type" = "task" ] && [ -n "$task_id" ]; then
+      if report_task_failure_from_controller "$task_id" "$global_slot_timeout_exit_code" "Timed out waiting ${global_slot_timeout_secs}s for a global worker slot"; then
+        log "Task failure reported to backend: task_id=${task_id} exit_code=${global_slot_timeout_exit_code}"
+      else
+        log "Task failure report to backend failed (best-effort): task_id=${task_id} exit_code=${global_slot_timeout_exit_code}"
+      fi
+    fi
+    return "$global_slot_timeout_exit_code"
+  fi
+
   exec 200>>"$repo_lock_file"
   flock 200
 
   if [ "$shutdown_requested" -ne 0 ] || [ -f "$shutdown_flag_file" ]; then
     log "Skipping queued job due to shutdown: id=${job_id} repo=${repo} agent=${agent_id}"
     write_job_status "$job_workspace" "$job_id" "$repo" "$agent_id" "$trigger_type" "cancelled" "-"
+    release_global_slot
     return 0
   fi
 
@@ -1440,6 +1559,7 @@ run_job() {
   if ! container_id="$(spawn_worker "$job_id" "$repo" "$agent_id" "$job_workspace" "$job_home" "$token_file" "$extra_prompt" "$session_key" "$trigger_type" "$task_id" "$task_prompt" "$task_claim_token" "$task_messages_file")"; then
     cleanup_job_home_credentials "$job_home"
     write_job_status "$job_workspace" "$job_id" "$repo" "$agent_id" "$trigger_type" "failed" "125"
+    release_global_slot
     return 125
   fi
 
@@ -1484,7 +1604,9 @@ run_job() {
   # Task failure reporting: safety net for crashes/OOM where run-task.sh
   # could not self-report. Best-effort: errors never affect the run outcome.
   if [ "$exit_code" -ne 0 ] && [ "$trigger_type" = "task" ] && [ -n "$task_id" ]; then
-    if report_task_failure_from_controller "$task_id" "$exit_code"; then
+    local classified_error=""
+    classified_error="$(classify_worker_log_failure "$container_log_file" 2>/dev/null || true)"
+    if report_task_failure_from_controller "$task_id" "$exit_code" "$classified_error"; then
       log "Task failure reported to backend: task_id=${task_id} exit_code=${exit_code}"
     else
       log "Task failure report to backend failed (best-effort): task_id=${task_id} exit_code=${exit_code}"
@@ -1493,6 +1615,7 @@ run_job() {
 
   "$docker_cmd" rm -f "$container_id" >/dev/null 2>&1 || true
   cleanup_job_home_credentials "$job_home"
+  release_global_slot
 
   if [ "$exit_code" -eq 0 ]; then
     write_job_status "$job_workspace" "$job_id" "$repo" "$agent_id" "$trigger_type" "completed" "$exit_code"
@@ -1709,6 +1832,7 @@ claim_next_task() {
 queue_claimed_task_job() {
   local agent_id=""
   local job_id=""
+  local task_session_key=""
 
   if [ -z "$claimed_task_id" ] || [ -z "$claimed_task_prompt" ] || [ -z "$claimed_task_repo" ] || [ -z "$claimed_task_claim_token" ]; then
     return 1
@@ -1716,8 +1840,9 @@ queue_claimed_task_job() {
 
   agent_id="$(pick_next_task_agent)"
   job_id="$(generate_job_id)"
+  task_session_key="task:${claimed_task_id}"
 
-  if launch_job "$job_id" "$claimed_task_repo" "$agent_id" "task" "$global_extra_prompt" "" "" "" "" "$claimed_task_id" "$claimed_task_prompt" "$claimed_task_claim_token" "$claimed_task_messages_json"; then
+  if launch_job "$job_id" "$claimed_task_repo" "$agent_id" "task" "$global_extra_prompt" "" "" "$task_session_key" "" "$claimed_task_id" "$claimed_task_prompt" "$claimed_task_claim_token" "$claimed_task_messages_json"; then
     log "Queued claimed task: task_id=${claimed_task_id} repo=${claimed_task_repo} agent=${agent_id} job=${job_id}"
     return 0
   fi
@@ -1849,13 +1974,15 @@ start_agent_scheduler() {
 # next_run_at is approximated as now + periodic_interval; the controller loop
 # does not track exact per-agent wake times from scheduler subshells.
 fire_heartbeats() {
-  local next_run_at agent_id token_file
+  local next_run_at agent_id health_token_input
   next_run_at="$(date -u -d "+${periodic_interval} seconds" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
     || date -u -v "+${periodic_interval}S" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
     || true)"
+  # Use the shared health report auth input, not per-agent GitHub PATs.
+  # Prefer the file path when present, otherwise fall back to the inline token.
+  health_token_input="${HIVEMOOT_AGENT_TOKEN_FILE:-${HIVEMOOT_AGENT_TOKEN:-}}"
   for agent_id in "${agent_ids[@]}"; do
-    token_file="${agent_token_files[$agent_id]:-}"
-    send_heartbeat "$agent_id" "$target_repo" "$token_file" "$next_run_at" || true
+    send_heartbeat "$agent_id" "$target_repo" "$health_token_input" "$next_run_at" || true
     log "Heartbeat attempted: agent=${agent_id}"
   done
 }
@@ -1955,12 +2082,18 @@ worker_image="${WORKER_IMAGE:-hivemoot-agent:local}"
 worker_name_prefix="${CONTROLLER_WORKER_NAME_PREFIX:-hivemoot-worker}"
 controller_mode="${CONTROLLER_RUN_MODE:-once}"
 controller_max_workers="${CONTROLLER_MAX_WORKERS:-1}"
+global_max_workers="${GLOBAL_MAX_WORKERS:-0}"
+global_slots_dir="${GLOBAL_SLOTS_DIR:-}"
+global_slot_timeout_periodic_secs="${GLOBAL_SLOT_TIMEOUT_PERIODIC_SECS:-300}"
+global_slot_timeout_mention_secs="${GLOBAL_SLOT_TIMEOUT_MENTION_SECS:-600}"
+global_slot_timeout_task_secs="${GLOBAL_SLOT_TIMEOUT_TASK_SECS:-600}"
 periodic_interval="${PERIODIC_INTERVAL_SECS:-3600}"
 periodic_jitter="${PERIODIC_JITTER_SECS:-300}"
 watch_mentions="${WATCH_MENTIONS:-0}"
 watch_review_requests="${WATCH_REVIEW_REQUESTS:-0}"
 watch_tasks="${WATCH_TASKS:-0}"
 watch_poll_interval="${WATCH_POLL_INTERVAL:-300}"
+watch_trigger_failure_backoff_secs="${WATCH_TRIGGER_FAILURE_BACKOFF_SECS:-300}"
 task_poll_interval_secs="${TASK_POLL_INTERVAL_SECS:-120}"
 task_dispatch_agent_ids="${TASK_DISPATCH_AGENT_IDS:-}"
 orphan_recovery_grace_secs="${ORPHAN_RECOVERY_GRACE_SECS:-0}"
@@ -1969,6 +2102,7 @@ workspace_ttl_secs="${WORKSPACE_TTL_SECS:-86400}"
 queue_maintenance_interval_secs="${QUEUE_MAINTENANCE_INTERVAL_SECS:-60}"
 heartbeat_interval_secs="${HEARTBEAT_INTERVAL_SECS:-1800}"
 shutdown_grace_secs="${CONTROLLER_SHUTDOWN_GRACE_SECS:-30}"
+global_slot_timeout_exit_code=124
 workspace_root="${CONTROLLER_WORKSPACE_ROOT:-${WORKSPACE_ROOT:-$(pwd)/data/controller}}"
 shared_git_cache_root="${workspace_root}/.git-cache"
 worker_git_cache_dir="/workspace/.git-cache"
@@ -2057,8 +2191,12 @@ if [ "$watch_mentions" = "1" ] && [ "$watch_tasks" = "1" ]; then
 fi
 
 require_positive_integer CONTROLLER_MAX_WORKERS "$controller_max_workers"
+require_non_negative_integer GLOBAL_MAX_WORKERS "$global_max_workers"
 require_positive_integer AGENT_TIMEOUT_SECONDS "$agent_timeout_seconds"
 require_positive_integer CONTROLLER_SHUTDOWN_GRACE_SECS "$shutdown_grace_secs"
+require_non_negative_integer GLOBAL_SLOT_TIMEOUT_PERIODIC_SECS "$global_slot_timeout_periodic_secs"
+require_non_negative_integer GLOBAL_SLOT_TIMEOUT_MENTION_SECS "$global_slot_timeout_mention_secs"
+require_non_negative_integer GLOBAL_SLOT_TIMEOUT_TASK_SECS "$global_slot_timeout_task_secs"
 require_positive_integer PERIODIC_INTERVAL_SECS "$periodic_interval"
 require_non_negative_integer PERIODIC_JITTER_SECS "$periodic_jitter"
 require_non_negative_integer ORPHAN_RECOVERY_GRACE_SECS "$orphan_recovery_grace_secs"
@@ -2066,6 +2204,7 @@ require_non_negative_integer QUEUE_ARTIFACT_TTL_SECS "$queue_artifact_ttl_secs"
 require_non_negative_integer WORKSPACE_TTL_SECS "$workspace_ttl_secs"
 require_non_negative_integer QUEUE_MAINTENANCE_INTERVAL_SECS "$queue_maintenance_interval_secs"
 require_non_negative_integer HEARTBEAT_INTERVAL_SECS "$heartbeat_interval_secs"
+require_non_negative_integer WATCH_TRIGGER_FAILURE_BACKOFF_SECS "$watch_trigger_failure_backoff_secs"
 if [ "$watch_mentions" = "1" ]; then
   require_positive_integer WATCH_POLL_INTERVAL "$watch_poll_interval"
 fi
@@ -2131,6 +2270,7 @@ fi
 mkdir -p "$jobs_root" "$runs_root" "$workspaces_root" "$homes_root" "$queue_root" "$watch_state_root" "$lock_dir" "$token_tmp_root" "$shared_git_cache_root"
 chmod 700 "$workspace_root" "$jobs_root" "$runs_root" "$workspaces_root" "$homes_root" "$queue_root" "$watch_state_root" "$lock_dir" "$token_tmp_root" "$shared_git_cache_root" 2>/dev/null || true
 rm -f "$shutdown_flag_file"
+init_global_slots "$global_slots_dir" "$global_max_workers"
 declare -A seen_agents=()
 declare -A agent_skill_lists=()
 declare -a agent_ids=()
@@ -2170,6 +2310,11 @@ trap cleanup EXIT
 agent_count="${#agent_ids[@]}"
 
 log "Controller starting: mode=${controller_mode} repo=${target_repo} agents=${agent_count} max_workers=${controller_max_workers}"
+if [ "${HIVEMOOT_GLOBAL_SLOTS_ENABLED:-0}" = "1" ]; then
+  log "Global worker slots enabled: count=${global_max_workers} dir=${global_slots_dir}"
+elif [ "$global_max_workers" -gt 0 ]; then
+  log "Global worker slots disabled: count=${global_max_workers} dir=${global_slots_dir:-unset}"
+fi
 log "Worker image: ${worker_image}"
 log "Workspace root: ${workspace_root}"
 log "This controller runs on the host. Do not mount docker.sock into a container for controller execution."

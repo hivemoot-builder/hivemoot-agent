@@ -95,6 +95,8 @@ This repo is the agent runner — step 3 of setting up a Hivemoot:
 3. **Run your agents** — this repo *(you are here)*
 4. **[Start building](https://github.com/hivemoot/hivemoot#4-start-building)** — schedule runs and let them ship
 
+Project direction and architecture principles are defined in [`VISION.md`](VISION.md).
+
 ## Prerequisites
 
 - Docker Desktop (or Docker Engine)
@@ -209,13 +211,14 @@ RUN_MODE=loop WATCH_MENTIONS=1 docker compose up hivemoot-agent
 
 Requires `TARGET_REPO` and user tokens (not installation tokens). Additional settings:
 - `WATCH_POLL_INTERVAL` — seconds between mention polls (default: 300)
+- `WATCH_TRIGGER_FAILURE_BACKOFF_SECS` — cooldown before a failed mention/review-request event is eligible for retry again (default: 300, set `0` to disable)
 - `WATCH_REVIEW_REQUESTS` — set `1` to also watch for PR review requests and dispatch review jobs (requires `WATCH_MENTIONS=1`)
 - `SESSION_RESUME` — set `0` to disable session resume and always start fresh runs (default: `1`)
 - `SESSION_RESUME_MAX_IDLE_HOURS` — reset stale sessions after this idle window (default: `12`)
 - `SESSION_RESUME_MAX_AGE_HOURS` — reset sessions older than this total age window (default: `24`)
 - `GIT_CLONE_DEPTH` — shallow clone depth (default `50`, `0` for full clone). Existing checkouts are reused automatically via fetch + reset
 
-Both `codex` and `claude` providers support mention-triggered session resume. Each provider keeps one session per GitHub notification thread and resumes follow-up mentions with the saved session UUID. For Codex the UUID comes from `--json` output (`thread.started.thread_id`) and is resumed via `codex exec resume <SESSION_ID>`. For Claude the UUID is extracted from the stream-JSON `init` event (`session_id`) and resumed via `claude --resume <SESSION_ID>`. Session maps are persisted under each agent workspace (for example `/workspace/repo/agents/<agent-id>/sessions/<provider>/tool-session-map.tsv`), scoped by runtime settings (repo/provider/model/tool options + mention key) to avoid cross-config reuse. Periodic runs (no mention session key) always start fresh. Resume is strict: sessions reset when idle/age limits are exceeded (`SESSION_RESUME_MAX_IDLE_HOURS` / `SESSION_RESUME_MAX_AGE_HOURS`), and any failed resume is retried once as a fresh session.
+Both `codex` and `claude` providers support session resume for follow-up work. Mention watching stores one session per GitHub notification thread, and task mode / `WATCH_TASKS=1` workers default to `task:<task_id>` keys so delegated follow-ups can reuse the same provider session. For Codex the UUID comes from `--json` output (`thread.started.thread_id`) and is resumed via `codex exec resume <SESSION_ID>`. For Claude the UUID is extracted from the stream-JSON `init` event (`session_id`) and is resumed via `claude --resume <SESSION_ID>`; task mode still writes a clean markdown result by extracting Claude's final `result` event before posting it back. Session maps are persisted under each agent workspace (for example `/workspace/repo/agents/<agent-id>/sessions/<provider>/tool-session-map.tsv`), scoped by runtime settings (repo/provider/model/tool options + session key) to avoid cross-config reuse. Periodic runs (no session key) always start fresh. Resume is strict: sessions reset when idle/age limits are exceeded (`SESSION_RESUME_MAX_IDLE_HOURS` / `SESSION_RESUME_MAX_AGE_HOURS`), and any failed resume is retried once as a fresh session.
 
 **Task mode** — claim one delegated task, execute it through the same `run-once`
 runtime path, report progress/result, then exit:
@@ -239,6 +242,12 @@ Task mode supports two task sources:
 
 Task and health auth share one runtime token variable (`HIVEMOOT_AGENT_TOKEN`),
 with optional file-based input via `HIVEMOOT_AGENT_TOKEN_FILE`.
+
+Task runs reuse the normal session-resume policy by default: direct `RUN_MODE=task`
+invocations and controller-dispatched task workers both use `task:<task_id>` as the
+base session key, so quick follow-ups can keep provider context when
+`SESSION_RESUME=1`. If your backend can reuse the same `task_id` for unrelated
+work, disable that behavior with `SESSION_RESUME=0`.
 
 For backend updates:
 - `AGENT_TASK_EXECUTE_BASE_URL` posts to `${base}/${taskId}/execute`
@@ -301,7 +310,8 @@ independent of whether health reporting is enabled.
 What it does:
 - Uses `spawn_worker()` as the container-launch seam for future backend swaps.
 - Applies worker hardening flags (`--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--read-only`, tmpfs mounts, resource limits).
-- Enforces per-repo mutual exclusion with `flock` plus a global max worker cap (locks default under `/tmp/hivemoot-controller-locks`).
+- Enforces per-repo mutual exclusion with `flock` plus a controller-local worker cap (`CONTROLLER_MAX_WORKERS`, locks default under `/tmp/hivemoot-controller-locks`).
+- Optionally enforces a host-wide worker cap across multiple controller services with a shared flock semaphore (`GLOBAL_MAX_WORKERS` + `GLOBAL_SLOTS_DIR`).
 - Supports mention-triggered jobs (`WATCH_MENTIONS=1`) via a filesystem queue under `queue/` and per-agent watch state under `watch-state/`.
 - Supports delegated task watching (`WATCH_TASKS=1`) by polling `AGENT_TASK_CLAIM_URL` and spawning one-shot `RUN_MODE=task` workers with claimed `task_id/prompt/repo`.
 - Defers mention acknowledgment until the spawned worker job succeeds.
@@ -326,6 +336,15 @@ Run continuously:
 
 ```bash
 CONTROLLER_RUN_MODE=loop bash scripts/controller.sh
+```
+
+Enable a shared fleet cap across multiple controller services on the same host:
+
+```bash
+GLOBAL_MAX_WORKERS=4 \
+GLOBAL_SLOTS_DIR=/var/lock/hivemoot-global-slots \
+CONTROLLER_RUN_MODE=loop \
+bash scripts/controller.sh
 ```
 
 Run continuously with mention watching:
