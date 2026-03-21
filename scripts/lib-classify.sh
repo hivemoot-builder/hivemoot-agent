@@ -113,6 +113,37 @@ classify_run_failure_from_file() {
     printf 'Failed to configure git credentials'
     return 0
   fi
+  # run-once.sh: "Failed to resolve role config. Provider launch aborted."
+  if grep -qF "Failed to resolve role config." "$file" 2>/dev/null; then
+    printf 'Failed to resolve role config — check HIVEMOOT_BUZZ_ROLE and hivemoot CLI'
+    return 0
+  fi
+  # run-once.sh: "Failed to parse role config JSON. Provider launch aborted."
+  if grep -qF "Failed to parse role config JSON." "$file" 2>/dev/null; then
+    printf 'Failed to parse role config JSON — check hivemoot CLI output'
+    return 0
+  fi
+  # run-once.sh: "Unsupported AGENT_AUTH_MODE: <value>. Use auto|api_key|subscription."
+  if grep -qF "Unsupported AGENT_AUTH_MODE:" "$file" 2>/dev/null; then
+    printf 'Unsupported AGENT_AUTH_MODE value — check auth mode'
+    return 0
+  fi
+  # run-once.sh: "Unsupported AGENT_PROVIDER: <value>. Use codex|gemini|claude|kilo|opencode."
+  if grep -qF "Unsupported AGENT_PROVIDER:" "$file" 2>/dev/null; then
+    printf 'Unsupported AGENT_PROVIDER value — check provider name'
+    return 0
+  fi
+  # run-once.sh: "Base prompt file not found: <path>" — checked before generic prompt pattern
+  # to prevent "Prompt file not found" from matching both messages (both contain "prompt file not found").
+  if grep -qF "Base prompt file not found:" "$file" 2>/dev/null; then
+    printf 'Base prompt file not found — check prompt directory structure'
+    return 0
+  fi
+  # run-once.sh: "Prompt file not found: <path>"
+  if grep -qF "Prompt file not found:" "$file" 2>/dev/null; then
+    printf 'Prompt file not found — check AGENT_PROMPT_FILE'
+    return 0
+  fi
 
   return 0
 }

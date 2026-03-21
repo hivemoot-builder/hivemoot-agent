@@ -145,6 +145,47 @@ assert_eq \
   "$(classify_run_failure_from_file "${tmp}/git-cred")" \
   "git credential helper"
 
+# --- Role-config errors ---
+
+printf 'Failed to resolve role config. Provider launch aborted.\n' > "${tmp}/role-resolve"
+assert_eq \
+  "Failed to resolve role config — check HIVEMOOT_BUZZ_ROLE and hivemoot CLI" \
+  "$(classify_run_failure_from_file "${tmp}/role-resolve")" \
+  "Failed to resolve role config"
+
+printf 'Failed to parse role config JSON. Provider launch aborted.\n' > "${tmp}/role-parse"
+assert_eq \
+  "Failed to parse role config JSON — check hivemoot CLI output" \
+  "$(classify_run_failure_from_file "${tmp}/role-parse")" \
+  "Failed to parse role config JSON"
+
+# --- Config-validation errors ---
+
+printf 'Unsupported AGENT_AUTH_MODE: badmode. Use auto|api_key|subscription.\n' > "${tmp}/bad-auth"
+assert_eq \
+  "Unsupported AGENT_AUTH_MODE value — check auth mode" \
+  "$(classify_run_failure_from_file "${tmp}/bad-auth")" \
+  "Unsupported AGENT_AUTH_MODE"
+
+printf 'Unsupported AGENT_PROVIDER: badprovider. Use codex|gemini|claude|kilo|opencode.\n' > "${tmp}/bad-provider"
+assert_eq \
+  "Unsupported AGENT_PROVIDER value — check provider name" \
+  "$(classify_run_failure_from_file "${tmp}/bad-provider")" \
+  "Unsupported AGENT_PROVIDER"
+
+# "Base prompt file not found:" must match the base-prompt pattern, not the generic one
+printf 'Base prompt file not found: /opt/hivemoot-agent/prompts/custom/base.md\n' > "${tmp}/base-prompt"
+assert_eq \
+  "Base prompt file not found — check prompt directory structure" \
+  "$(classify_run_failure_from_file "${tmp}/base-prompt")" \
+  "Base prompt file not found"
+
+printf 'Prompt file not found: /opt/hivemoot-agent/prompts/custom/task.md\n' > "${tmp}/prompt-file"
+assert_eq \
+  "Prompt file not found — check AGENT_PROMPT_FILE" \
+  "$(classify_run_failure_from_file "${tmp}/prompt-file")" \
+  "Prompt file not found"
+
 # --- Unknown error returns empty ---
 
 printf 'Some completely unknown failure\n' > "${tmp}/unknown"
