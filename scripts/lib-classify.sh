@@ -113,6 +113,55 @@ classify_run_failure_from_file() {
     printf 'Failed to configure git credentials'
     return 0
   fi
+  # run-once.sh OpenCode startup errors (grouped after Kilo/provider-key patterns,
+  # before generic CLI-not-installed patterns).
+  if grep -qF "opencode CLI is not installed in the container" "$file" 2>/dev/null; then
+    printf 'opencode not installed'
+    return 0
+  fi
+  if grep -qF "ZAI_API_KEY is required when OPENCODE_PROVIDER=zai" "$file" 2>/dev/null; then
+    printf 'missing api key for opencode (ZAI)'
+    return 0
+  fi
+  if grep -qF "OpenCode auth not configured" "$file" 2>/dev/null; then
+    printf 'opencode auth not configured'
+    return 0
+  fi
+  # run-once.sh: CLI-not-installed for providers not covered by subscription/key patterns
+  if grep -qF "kilo CLI is not installed in the container" "$file" 2>/dev/null; then
+    printf 'kilo not installed'
+    return 0
+  fi
+  if grep -qF "codex CLI is not installed in the container" "$file" 2>/dev/null; then
+    printf 'codex not installed'
+    return 0
+  fi
+  if grep -qF "gemini CLI is not installed in the container" "$file" 2>/dev/null; then
+    printf 'gemini not installed'
+    return 0
+  fi
+  if grep -qF "claude CLI is not installed in the container" "$file" 2>/dev/null; then
+    printf 'claude not installed'
+    return 0
+  fi
+  # run-once.sh: infrastructure dependency errors — missing host binaries required for
+  # specific features (HIVEMOOT_BUZZ_ROLE, AGENT_TOOL_OPTIONS_JSON, --plugin-dir).
+  if grep -qF "HIVEMOOT_BUZZ_ROLE is set but hivemoot CLI is not installed" "$file" 2>/dev/null; then
+    printf 'hivemoot CLI not installed (required for HIVEMOOT_BUZZ_ROLE)'
+    return 0
+  fi
+  if grep -qF "HIVEMOOT_BUZZ_ROLE is set but node is not installed" "$file" 2>/dev/null; then
+    printf 'node not installed (required for HIVEMOOT_BUZZ_ROLE)'
+    return 0
+  fi
+  if grep -qF "AGENT_TOOL_OPTIONS_JSON is set but jq is not installed" "$file" 2>/dev/null; then
+    printf 'jq not installed (required for AGENT_TOOL_OPTIONS_JSON)'
+    return 0
+  fi
+  if grep -qF "AGENT_AVAILABLE_SKILLS is set but the installed Claude CLI does not support --plugin-dir" "$file" 2>/dev/null; then
+    printf 'Claude CLI does not support --plugin-dir (update CLAUDE_CODE_VERSION or unset AGENT_AVAILABLE_SKILLS)'
+    return 0
+  fi
 
   return 0
 }

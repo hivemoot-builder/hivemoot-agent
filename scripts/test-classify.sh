@@ -145,6 +145,80 @@ assert_eq \
   "$(classify_run_failure_from_file "${tmp}/git-cred")" \
   "git credential helper"
 
+# --- OpenCode startup errors ---
+
+printf 'opencode CLI is not installed in the container.\n' > "${tmp}/opencode-not-installed"
+assert_eq \
+  "opencode not installed" \
+  "$(classify_run_failure_from_file "${tmp}/opencode-not-installed")" \
+  "opencode CLI not installed"
+
+printf 'ZAI_API_KEY is required when OPENCODE_PROVIDER=zai.\n' > "${tmp}/opencode-zai-key"
+assert_eq \
+  "missing api key for opencode (ZAI)" \
+  "$(classify_run_failure_from_file "${tmp}/opencode-zai-key")" \
+  "ZAI_API_KEY missing"
+
+printf 'OpenCode auth not configured. Set OPENCODE_PROVIDER + API key, or run: opencode auth login.\n' \
+  > "${tmp}/opencode-auth"
+assert_eq \
+  "opencode auth not configured" \
+  "$(classify_run_failure_from_file "${tmp}/opencode-auth")" \
+  "OpenCode auth not configured"
+
+# --- CLI-not-installed for remaining providers ---
+
+printf 'kilo CLI is not installed in the container.\n' > "${tmp}/kilo-not-installed"
+assert_eq \
+  "kilo not installed" \
+  "$(classify_run_failure_from_file "${tmp}/kilo-not-installed")" \
+  "kilo CLI not installed"
+
+printf 'codex CLI is not installed in the container.\n' > "${tmp}/codex-not-installed"
+assert_eq \
+  "codex not installed" \
+  "$(classify_run_failure_from_file "${tmp}/codex-not-installed")" \
+  "codex CLI not installed"
+
+printf 'gemini CLI is not installed in the container.\n' > "${tmp}/gemini-not-installed"
+assert_eq \
+  "gemini not installed" \
+  "$(classify_run_failure_from_file "${tmp}/gemini-not-installed")" \
+  "gemini CLI not installed"
+
+printf 'claude CLI is not installed in the container.\n' > "${tmp}/claude-not-installed"
+assert_eq \
+  "claude not installed" \
+  "$(classify_run_failure_from_file "${tmp}/claude-not-installed")" \
+  "claude CLI not installed"
+
+# --- Infrastructure dependency errors ---
+
+printf 'HIVEMOOT_BUZZ_ROLE is set but hivemoot CLI is not installed.\n' > "${tmp}/buzz-no-hivemoot"
+assert_eq \
+  "hivemoot CLI not installed (required for HIVEMOOT_BUZZ_ROLE)" \
+  "$(classify_run_failure_from_file "${tmp}/buzz-no-hivemoot")" \
+  "hivemoot CLI missing for HIVEMOOT_BUZZ_ROLE"
+
+printf 'HIVEMOOT_BUZZ_ROLE is set but node is not installed for JSON parsing.\n' > "${tmp}/buzz-no-node"
+assert_eq \
+  "node not installed (required for HIVEMOOT_BUZZ_ROLE)" \
+  "$(classify_run_failure_from_file "${tmp}/buzz-no-node")" \
+  "node missing for HIVEMOOT_BUZZ_ROLE"
+
+printf 'AGENT_TOOL_OPTIONS_JSON is set but jq is not installed.\n' > "${tmp}/tool-opts-no-jq"
+assert_eq \
+  "jq not installed (required for AGENT_TOOL_OPTIONS_JSON)" \
+  "$(classify_run_failure_from_file "${tmp}/tool-opts-no-jq")" \
+  "jq missing for AGENT_TOOL_OPTIONS_JSON"
+
+printf 'AGENT_AVAILABLE_SKILLS is set but the installed Claude CLI does not support --plugin-dir.\n' \
+  > "${tmp}/skills-no-plugin-dir"
+assert_eq \
+  "Claude CLI does not support --plugin-dir (update CLAUDE_CODE_VERSION or unset AGENT_AVAILABLE_SKILLS)" \
+  "$(classify_run_failure_from_file "${tmp}/skills-no-plugin-dir")" \
+  "Claude CLI plugin-dir not supported"
+
 # --- Unknown error returns empty ---
 
 printf 'Some completely unknown failure\n' > "${tmp}/unknown"
