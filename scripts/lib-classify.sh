@@ -114,5 +114,47 @@ classify_run_failure_from_file() {
     return 0
   fi
 
+  # run-once.sh: "Missing required command: <cmd>" (early startup check, line 95)
+  if grep -qF "Missing required command:" "$file" 2>/dev/null; then
+    printf 'Missing required command — check container image or provider installation'
+    return 0
+  fi
+
+  # run-once.sh: session config validation errors (lines 292–308)
+  if grep -qF "Unsupported SESSION_RESUME:" "$file" 2>/dev/null; then
+    printf 'Unsupported SESSION_RESUME value — use 0 or 1'
+    return 0
+  fi
+  if grep -qF "Unsupported SESSION_RESUME_MAX_IDLE_HOURS:" "$file" 2>/dev/null; then
+    printf 'Unsupported SESSION_RESUME_MAX_IDLE_HOURS value — use a positive integer'
+    return 0
+  fi
+  if grep -qF "Unsupported SESSION_RESUME_MAX_AGE_HOURS:" "$file" 2>/dev/null; then
+    printf 'Unsupported SESSION_RESUME_MAX_AGE_HOURS value — use a positive integer'
+    return 0
+  fi
+  if grep -qF "Unsupported GIT_CLONE_DEPTH:" "$file" 2>/dev/null; then
+    printf 'Unsupported GIT_CLONE_DEPTH value — use 0 (full clone) or a positive integer'
+    return 0
+  fi
+
+  # run-once.sh: "Unsupported auth mode/provider combination: ..." (line 321)
+  if grep -qF "Unsupported auth mode/provider combination:" "$file" 2>/dev/null; then
+    printf 'Unsupported auth mode/provider combination — check AGENT_PROVIDER and AGENT_AUTH_MODE'
+    return 0
+  fi
+
+  # run-once.sh: "Invalid AGENT_TOOL_OPTIONS_JSON: ..." (lines 702–704)
+  if grep -qF "Invalid AGENT_TOOL_OPTIONS_JSON:" "$file" 2>/dev/null; then
+    printf 'Invalid AGENT_TOOL_OPTIONS_JSON — check JSON syntax'
+    return 0
+  fi
+
+  # run-once.sh: "Invalid codex model_reasoning_effort: ..." (line 715)
+  if grep -qF "Invalid codex model_reasoning_effort:" "$file" 2>/dev/null; then
+    printf 'Invalid codex model_reasoning_effort — expected low|medium|high|xhigh'
+    return 0
+  fi
+
   return 0
 }

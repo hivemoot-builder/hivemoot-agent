@@ -145,6 +145,74 @@ assert_eq \
   "$(classify_run_failure_from_file "${tmp}/git-cred")" \
   "git credential helper"
 
+# --- Missing required command ---
+
+printf 'Missing required command: gh\n' > "${tmp}/missing-cmd"
+assert_eq \
+  "Missing required command — check container image or provider installation" \
+  "$(classify_run_failure_from_file "${tmp}/missing-cmd")" \
+  "Missing required command"
+
+# --- Session config validation ---
+
+printf 'Unsupported SESSION_RESUME: 2. Use 0|1.\n' > "${tmp}/session-resume"
+assert_eq \
+  "Unsupported SESSION_RESUME value — use 0 or 1" \
+  "$(classify_run_failure_from_file "${tmp}/session-resume")" \
+  "Unsupported SESSION_RESUME"
+
+printf 'Unsupported SESSION_RESUME_MAX_IDLE_HOURS: abc. Use a positive integer.\n' \
+  > "${tmp}/session-idle"
+assert_eq \
+  "Unsupported SESSION_RESUME_MAX_IDLE_HOURS value — use a positive integer" \
+  "$(classify_run_failure_from_file "${tmp}/session-idle")" \
+  "Unsupported SESSION_RESUME_MAX_IDLE_HOURS"
+
+printf 'Unsupported SESSION_RESUME_MAX_AGE_HOURS: -1. Use a positive integer.\n' \
+  > "${tmp}/session-age"
+assert_eq \
+  "Unsupported SESSION_RESUME_MAX_AGE_HOURS value — use a positive integer" \
+  "$(classify_run_failure_from_file "${tmp}/session-age")" \
+  "Unsupported SESSION_RESUME_MAX_AGE_HOURS"
+
+printf 'Unsupported GIT_CLONE_DEPTH: -5. Use 0 (full clone) or a positive integer.\n' \
+  > "${tmp}/clone-depth"
+assert_eq \
+  "Unsupported GIT_CLONE_DEPTH value — use 0 (full clone) or a positive integer" \
+  "$(classify_run_failure_from_file "${tmp}/clone-depth")" \
+  "Unsupported GIT_CLONE_DEPTH"
+
+# --- Auth mode/provider combination ---
+
+printf 'Unsupported auth mode/provider combination: provider=gemini auth_mode=subscription\n' \
+  > "${tmp}/auth-combo"
+assert_eq \
+  "Unsupported auth mode/provider combination — check AGENT_PROVIDER and AGENT_AUTH_MODE" \
+  "$(classify_run_failure_from_file "${tmp}/auth-combo")" \
+  "Unsupported auth mode/provider combination"
+
+# --- Runtime config: tool options and model ---
+
+printf 'Invalid AGENT_TOOL_OPTIONS_JSON: parse error at line 1\n' > "${tmp}/tool-opts"
+assert_eq \
+  "Invalid AGENT_TOOL_OPTIONS_JSON — check JSON syntax" \
+  "$(classify_run_failure_from_file "${tmp}/tool-opts")" \
+  "Invalid AGENT_TOOL_OPTIONS_JSON (jq error)"
+
+printf 'Invalid AGENT_TOOL_OPTIONS_JSON: failed to parse JSON payload.\n' \
+  > "${tmp}/tool-opts-payload"
+assert_eq \
+  "Invalid AGENT_TOOL_OPTIONS_JSON — check JSON syntax" \
+  "$(classify_run_failure_from_file "${tmp}/tool-opts-payload")" \
+  "Invalid AGENT_TOOL_OPTIONS_JSON (payload)"
+
+printf 'Invalid codex model_reasoning_effort: ultra (expected low|medium|high|xhigh).\n' \
+  > "${tmp}/codex-effort"
+assert_eq \
+  "Invalid codex model_reasoning_effort — expected low|medium|high|xhigh" \
+  "$(classify_run_failure_from_file "${tmp}/codex-effort")" \
+  "Invalid codex model_reasoning_effort"
+
 # --- Unknown error returns empty ---
 
 printf 'Some completely unknown failure\n' > "${tmp}/unknown"
