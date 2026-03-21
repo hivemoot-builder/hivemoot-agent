@@ -1929,7 +1929,7 @@ run_shutdown_term_stops_job_subshells_case() {
     AGENT_TIMEOUT_SECONDS="120" \
     PERIODIC_INTERVAL_SECS="60" \
     PERIODIC_JITTER_SECS="0" \
-    bash "${repo_root}/scripts/controller.sh" >"${case_dir}/controller.log" 2>&1 &
+    setsid bash "${repo_root}/scripts/controller.sh" >"${case_dir}/controller.log" 2>&1 &
   controller_pid=$!
 
   # Wait for the first job to launch (subshell is now blocked in docker wait).
@@ -1958,7 +1958,7 @@ run_shutdown_term_stops_job_subshells_case() {
   deadline=$((SECONDS + 20))
   while kill -0 "$controller_pid" 2>/dev/null; do
     if [ "$SECONDS" -ge "$deadline" ]; then
-      kill -KILL "$controller_pid" 2>/dev/null || true
+      kill -KILL -- -"$controller_pid" 2>/dev/null || true
       sed 's/^/  /' "${case_dir}/controller.log" >&2 || true
       fail "controller did not exit within 20s after SIGTERM (job subshell not stopped by handle_shutdown)"
     fi
@@ -1970,6 +1970,10 @@ run_shutdown_term_stops_job_subshells_case() {
   else
     controller_status=$?
   fi
+
+  # Kill any processes still in the controller's setsid process group
+  # (e.g., mock docker-wait sleep processes that outlived the controller).
+  kill -KILL -- -"$controller_pid" 2>/dev/null || true
 
   echo "PASS: SIGTERM stops job subshells via handle_shutdown (controller_exit=${controller_status})"
 }
