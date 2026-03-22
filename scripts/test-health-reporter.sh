@@ -261,6 +261,53 @@ test_payload_omits_empty_run_summary() {
   pass "payload omits empty run_summary"
 }
 
+test_payload_optional_error_detail() {
+  source_reporter
+  local payload
+  payload="$(_build_health_payload "a" "owner/repo" "run-1" "failure" "10" "1" "1" "run_failed" "" "" "" "" "fatal: could not read Remote")"
+  local has_detail
+  has_detail="$(printf '%s' "$payload" | jq 'has("error_detail")')"
+  [ "$has_detail" = "true" ] || fail "expected error_detail field when provided"
+  local detail_val
+  detail_val="$(printf '%s' "$payload" | jq -r '.error_detail')"
+  [ "$detail_val" = "fatal: could not read Remote" ] || fail "expected correct error_detail value, got '${detail_val}'"
+  pass "payload includes optional error_detail"
+}
+
+test_payload_omits_empty_error_detail() {
+  source_reporter
+  local payload
+  payload="$(_build_health_payload "a" "owner/repo" "run-1" "failure" "10" "1" "1" "run_failed" "" "" "" "" "")"
+  local has_detail
+  has_detail="$(printf '%s' "$payload" | jq 'has("error_detail")')"
+  [ "$has_detail" = "false" ] || fail "expected error_detail to be omitted when empty"
+  pass "payload omits empty error_detail"
+}
+
+test_extract_error_detail_strips_ansi() {
+  source_reporter
+  local tmplog
+  tmplog="$(mktemp)"
+  # Write a log line with CSI color codes, OSC+BEL hyperlink, OSC+ST hyperlink, and a bare ESC sequence.
+  printf '\033[0;32mok\033[0m\n' >> "$tmplog"
+  printf '\033]8;;https://example.com\007link text\033]8;;\007\n' >> "$tmplog"
+  printf '\033]8;;https://example.com\033\\link text\033]8;;\033\\\n' >> "$tmplog"
+  printf '\033Mreverse-linefeed\n' >> "$tmplog"
+  printf 'plain line\n' >> "$tmplog"
+
+  local result
+  result="$(_extract_health_error_detail_from_log "$tmplog")"
+  rm -f "$tmplog"
+
+  # No ESC bytes should remain
+  if printf '%s' "$result" | grep -qP '\033'; then
+    fail "expected no ESC bytes after sanitization, got: $(printf '%s' "$result" | cat -v)"
+  fi
+  # Plain content should be preserved
+  printf '%s' "$result" | grep -q "plain line" || fail "expected plain text to pass through"
+  pass "sanitizer strips CSI, OSC+BEL, OSC+ST, and bare ESC sequences"
+}
+
 # ── validation tests ─────────────────────────────────────────────
 
 test_validates_missing_agent_id() {
@@ -1158,6 +1205,9 @@ run_test test_payload_includes_token_usage
 run_test test_payload_omits_token_usage_when_empty
 run_test test_payload_optional_run_summary
 run_test test_payload_omits_empty_run_summary
+run_test test_payload_optional_error_detail
+run_test test_payload_omits_empty_error_detail
+run_test test_extract_error_detail_strips_ansi
 echo ""
 
 echo "  Validation — required fields:"
