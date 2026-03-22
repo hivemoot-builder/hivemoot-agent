@@ -10,7 +10,7 @@ The core runtime is functional: Docker container runs up to 10 agents
 in parallel against a single target repo, with per-agent isolation,
 multi-provider support, and CI with security scanning.
 
-- Multi-provider CLI support (Claude, Codex, Gemini)
+- Multi-provider CLI support (Claude, Codex, Gemini, Kilo, OpenCode)
 - Per-agent workspace, home directory, and log isolation
 - One-shot and loop run modes with mention watching
 - ShellCheck, Hadolint, Trivy security scanning in CI
