@@ -276,6 +276,99 @@ classify_worker_log_failure() {
   classify_run_failure_from_file "$1"
 }
 
+# ── Quota / auth backoff ─────────────────────────────────────────────────────
+#
+# When a periodic job fails with a quota-exhaustion or auth-failure pattern,
+# the scheduler should wait before trying again — retrying immediately will
+# fail in the same way and burn quota faster (the Gemini outage pattern, #356).
+#
+# State is persisted as a per-agent file under agent_backoff_root so scheduler
+# subshells can read it without shared-memory coordination.
+#
+# File format (two lines):
+#   until=<epoch_seconds>     — don't trigger until this time
+#   consecutive=<N>           — count of consecutive quota/auth failures
+#                               (used to double on each successive failure)
+
+# Write or update the quota backoff state for an agent after a failure.
+# Doubles the backoff on each consecutive failure, capped at quota_backoff_max_secs.
+# Logs the detected pattern and applied backoff window.
+#
+# $1 — agent_id
+# $2 — container log file (used for display; pattern already confirmed by caller)
+write_agent_quota_backoff() {
+  local agent_id="$1"
+  local log_file="$2"
+  local state_file="${agent_backoff_root}/${agent_id}"
+  local now=""
+  local consecutive=0
+  local backoff_secs="$quota_backoff_secs"
+  local until_epoch=""
+
+  now="$(date +%s 2>/dev/null || true)"
+  [ -z "$now" ] && { log "Quota backoff: cannot read epoch; skipping backoff for agent=${agent_id}"; return 0; }
+
+  if [ -f "$state_file" ]; then
+    local prev_consecutive=""
+    prev_consecutive="$(grep '^consecutive=' "$state_file" 2>/dev/null | cut -d= -f2 || true)"
+    if [ -n "$prev_consecutive" ] && [ "$prev_consecutive" -ge 1 ] 2>/dev/null; then
+      consecutive="$prev_consecutive"
+      # Double backoff for each consecutive failure, cap at max.
+      local i=0
+      while [ "$i" -lt "$consecutive" ] && [ "$backoff_secs" -lt "$quota_backoff_max_secs" ]; do
+        backoff_secs=$((backoff_secs * 2))
+        i=$((i + 1))
+      done
+      [ "$backoff_secs" -gt "$quota_backoff_max_secs" ] && backoff_secs="$quota_backoff_max_secs"
+    fi
+  fi
+
+  consecutive=$((consecutive + 1))
+  until_epoch=$((now + backoff_secs))
+
+  mkdir -p "$agent_backoff_root" 2>/dev/null || true
+  printf 'until=%s\nconsecutive=%s\n' "$until_epoch" "$consecutive" > "$state_file" || true
+
+  log "Quota backoff: agent=${agent_id} backoff=${backoff_secs}s consecutive=${consecutive} (log=${log_file})"
+}
+
+# Clear quota backoff state for an agent on a successful run.
+# $1 — agent_id
+clear_agent_quota_backoff() {
+  local agent_id="$1"
+  local state_file="${agent_backoff_root}/${agent_id}"
+  rm -f "$state_file" 2>/dev/null || true
+}
+
+# Return 0 (true) if the agent is currently within a quota backoff window.
+# Logs when the backoff is active so operators can see why a trigger was deferred.
+# $1 — agent_id
+is_agent_in_quota_backoff() {
+  local agent_id="$1"
+  local state_file="${agent_backoff_root}/${agent_id}"
+  local until_epoch=""
+  local now=""
+
+  [ -f "$state_file" ] || return 1
+
+  until_epoch="$(grep '^until=' "$state_file" 2>/dev/null | cut -d= -f2 || true)"
+  [ -n "$until_epoch" ] || { rm -f "$state_file" 2>/dev/null || true; return 1; }
+
+  now="$(date +%s 2>/dev/null || true)"
+  [ -z "$now" ] && return 1
+
+  if [ "$now" -lt "$until_epoch" ]; then
+    local remaining=$((until_epoch - now))
+    log "Scheduler[${agent_id}]: quota backoff active (${remaining}s remaining); deferring periodic trigger"
+    return 0
+  fi
+
+  # Backoff window expired; remove the state file so the next success does not
+  # need to clear it (file already gone), but keep consecutive count intact for
+  # the next failure if it comes before the next success.
+  return 1
+}
+
 # POST action=fail to the task execute endpoint from the controller.
 # Safety net for crashes/OOM where run-task.sh exits before self-reporting.
 # Best-effort: errors are logged but never affect the caller's flow.
@@ -1617,8 +1710,18 @@ run_job() {
 
   if [ "$exit_code" -eq 0 ]; then
     write_job_status "$job_workspace" "$job_id" "$repo" "$agent_id" "$trigger_type" "completed" "$exit_code"
+    # Clear any quota backoff on successful run so the agent returns to normal
+    # scheduling after a transient quota/auth window closes.
+    clear_agent_quota_backoff "$agent_id"
   else
     write_job_status "$job_workspace" "$job_id" "$repo" "$agent_id" "$trigger_type" "failed" "$exit_code"
+    # Detect quota/auth failures that make immediate retry futile.
+    # Only applies to periodic triggers — mention/task triggers are not rate-
+    # limited by the scheduler and are not subject to this backoff mechanism.
+    if [ "$trigger_type" = "periodic" ] && \
+       classify_is_quota_auth_failure "$container_log_file" 2>/dev/null; then
+      write_agent_quota_backoff "$agent_id" "$container_log_file"
+    fi
   fi
 
   return "$exit_code"
@@ -1949,7 +2052,9 @@ start_agent_scheduler() {
     fi
 
     while [ ! -f "$shutdown_flag_file" ]; do
-      if write_trigger_file "periodic" "$target_repo" "$agent_id" "$global_extra_prompt" "" "" ""; then
+      if is_agent_in_quota_backoff "$agent_id"; then
+        : # trigger deferred; is_agent_in_quota_backoff already logged
+      elif write_trigger_file "periodic" "$target_repo" "$agent_id" "$global_extra_prompt" "" "" ""; then
         log "Scheduler[${agent_id}]: queued periodic trigger"
       else
         log "Scheduler[${agent_id}]: failed to queue trigger"
@@ -2092,6 +2197,8 @@ watch_review_requests="${WATCH_REVIEW_REQUESTS:-0}"
 watch_tasks="${WATCH_TASKS:-0}"
 watch_poll_interval="${WATCH_POLL_INTERVAL:-300}"
 watch_trigger_failure_backoff_secs="${WATCH_TRIGGER_FAILURE_BACKOFF_SECS:-300}"
+quota_backoff_secs="${QUOTA_BACKOFF_SECS:-600}"
+quota_backoff_max_secs="${QUOTA_BACKOFF_MAX_SECS:-3600}"
 task_poll_interval_secs="${TASK_POLL_INTERVAL_SECS:-120}"
 task_dispatch_agent_ids="${TASK_DISPATCH_AGENT_IDS:-}"
 orphan_recovery_grace_secs="${ORPHAN_RECOVERY_GRACE_SECS:-0}"
@@ -2108,6 +2215,7 @@ runs_root="${workspace_root}/runs"
 workspaces_root="${workspace_root}/workspaces"
 homes_root="${workspace_root}/homes"
 queue_root="${workspace_root}/queue"
+agent_backoff_root="${workspace_root}/agent-backoff"
 watch_state_root="${workspace_root}/watch-state"
 lock_dir="${CONTROLLER_LOCK_DIR:-/tmp/hivemoot-controller-locks}"
 token_tmp_root="${CONTROLLER_TOKEN_TMP_ROOT:-/tmp/hivemoot-controller-token-files}"
@@ -2201,6 +2309,8 @@ require_non_negative_integer WORKSPACE_TTL_SECS "$workspace_ttl_secs"
 require_non_negative_integer QUEUE_MAINTENANCE_INTERVAL_SECS "$queue_maintenance_interval_secs"
 require_non_negative_integer HEARTBEAT_INTERVAL_SECS "$heartbeat_interval_secs"
 require_non_negative_integer WATCH_TRIGGER_FAILURE_BACKOFF_SECS "$watch_trigger_failure_backoff_secs"
+require_positive_integer QUOTA_BACKOFF_SECS "$quota_backoff_secs"
+require_positive_integer QUOTA_BACKOFF_MAX_SECS "$quota_backoff_max_secs"
 if [ "$watch_mentions" = "1" ]; then
   require_positive_integer WATCH_POLL_INTERVAL "$watch_poll_interval"
 fi
@@ -2263,8 +2373,8 @@ if [ "$watch_mentions" = "1" ]; then
   fi
 fi
 
-mkdir -p "$jobs_root" "$runs_root" "$workspaces_root" "$homes_root" "$queue_root" "$watch_state_root" "$lock_dir" "$token_tmp_root"
-chmod 700 "$workspace_root" "$jobs_root" "$runs_root" "$workspaces_root" "$homes_root" "$queue_root" "$watch_state_root" "$lock_dir" "$token_tmp_root" 2>/dev/null || true
+mkdir -p "$jobs_root" "$runs_root" "$workspaces_root" "$homes_root" "$queue_root" "$agent_backoff_root" "$watch_state_root" "$lock_dir" "$token_tmp_root"
+chmod 700 "$workspace_root" "$jobs_root" "$runs_root" "$workspaces_root" "$homes_root" "$queue_root" "$agent_backoff_root" "$watch_state_root" "$lock_dir" "$token_tmp_root" 2>/dev/null || true
 rm -f "$shutdown_flag_file"
 init_global_slots "$global_slots_dir" "$global_max_workers"
 declare -A seen_agents=()

@@ -2663,6 +2663,154 @@ run_task_failure_report_classified_error_case() {
   echo "PASS: controller classifies worker log and includes structured error in task fail payload"
 }
 
+run_quota_backoff_written_case() {
+  # When a periodic worker exits non-zero and the container log contains a
+  # quota/auth pattern, the controller should write a per-agent backoff state
+  # file before the next scheduler cycle. The file must contain an `until=`
+  # epoch timestamp and `consecutive=1` for the first failure.
+  local repo_root="$1"
+  local case_dir="$2"
+  local backoff_file=""
+  local until_val=""
+  local consecutive_val=""
+  local now=""
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+
+  now="$(date +%s)"
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_DOCKER_WAIT_EXIT="1" \
+    MOCK_DOCKER_LOG_CONTENT="429 Too Many Requests" \
+    TARGET_REPO="owner/repo" \
+    CONTROLLER_RUN_MODE="once" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    QUOTA_BACKOFF_SECS="600" \
+    QUOTA_BACKOFF_MAX_SECS="3600" \
+    bash "${repo_root}/scripts/controller.sh" || true
+
+  backoff_file="${case_dir}/workspace/agent-backoff/worker"
+  [ -f "$backoff_file" ] || fail "quota backoff state file not written after quota failure"
+
+  until_val="$(grep '^until=' "$backoff_file" | cut -d= -f2)"
+  consecutive_val="$(grep '^consecutive=' "$backoff_file" | cut -d= -f2)"
+
+  [ -n "$until_val" ] || fail "backoff file missing until= field"
+  [ -n "$consecutive_val" ] || fail "backoff file missing consecutive= field"
+  assert_eq "1" "$consecutive_val" "consecutive count on first quota failure"
+
+  # until must be at least now + QUOTA_BACKOFF_SECS (600s)
+  local min_until=$((now + 600))
+  if [ "$until_val" -lt "$min_until" ]; then
+    fail "backoff until (${until_val}) must be >= now+600 (${min_until})"
+  fi
+
+  echo "PASS: quota backoff state file written after periodic quota failure"
+}
+
+run_quota_backoff_cleared_on_success_case() {
+  # When a subsequent periodic run succeeds, the quota backoff state file must
+  # be removed so the agent returns to normal scheduling.
+  local repo_root="$1"
+  local case_dir="$2"
+  local backoff_file=""
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+
+  # Pre-seed a backoff state file for the agent.
+  mkdir -p "${case_dir}/workspace/agent-backoff"
+  printf 'until=9999999999\nconsecutive=2\n' \
+    > "${case_dir}/workspace/agent-backoff/worker"
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_DOCKER_WAIT_EXIT="0" \
+    TARGET_REPO="owner/repo" \
+    CONTROLLER_RUN_MODE="once" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    QUOTA_BACKOFF_SECS="600" \
+    QUOTA_BACKOFF_MAX_SECS="3600" \
+    bash "${repo_root}/scripts/controller.sh" || true
+
+  backoff_file="${case_dir}/workspace/agent-backoff/worker"
+  if [ -f "$backoff_file" ]; then
+    fail "quota backoff state file must be cleared after successful run"
+  fi
+
+  echo "PASS: quota backoff state file cleared after successful periodic run"
+}
+
+run_quota_backoff_exponential_case() {
+  # A second consecutive quota failure doubles the backoff delay.
+  local repo_root="$1"
+  local case_dir="$2"
+  local backoff_file=""
+  local until_val=""
+  local consecutive_val=""
+  local now=""
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+
+  now="$(date +%s)"
+
+  # Pre-seed a backoff state file indicating one prior failure.
+  mkdir -p "${case_dir}/workspace/agent-backoff"
+  local expired_until=$((now - 1))   # already expired — next failure should double
+  printf 'until=%s\nconsecutive=1\n' "$expired_until" \
+    > "${case_dir}/workspace/agent-backoff/worker"
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_DOCKER_WAIT_EXIT="1" \
+    MOCK_DOCKER_LOG_CONTENT="429 Too Many Requests" \
+    TARGET_REPO="owner/repo" \
+    CONTROLLER_RUN_MODE="once" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    QUOTA_BACKOFF_SECS="600" \
+    QUOTA_BACKOFF_MAX_SECS="3600" \
+    bash "${repo_root}/scripts/controller.sh" || true
+
+  backoff_file="${case_dir}/workspace/agent-backoff/worker"
+  [ -f "$backoff_file" ] || fail "quota backoff state file not written on second failure"
+
+  until_val="$(grep '^until=' "$backoff_file" | cut -d= -f2)"
+  consecutive_val="$(grep '^consecutive=' "$backoff_file" | cut -d= -f2)"
+
+  assert_eq "2" "$consecutive_val" "consecutive count on second quota failure"
+
+  # Second failure doubles: 600 * 2^1 = 1200s
+  local min_until=$((now + 1200))
+  if [ "$until_val" -lt "$min_until" ]; then
+    fail "doubled backoff until (${until_val}) must be >= now+1200 (${min_until})"
+  fi
+
+  echo "PASS: quota backoff doubles on second consecutive failure"
+}
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmpdir="$(mktemp -d "${repo_root}/.tmp-controller-test.XXXXXX")"
@@ -2715,4 +2863,7 @@ run_same_agent_concurrent_case "$repo_root" "${tmpdir}/same-agent-concurrent"
 run_periodic_deferral_cleanup_case "$repo_root" "${tmpdir}/periodic-deferral-cleanup"
 run_task_failure_report_case "$repo_root" "${tmpdir}/task-failure-report"
 run_task_failure_report_classified_error_case "$repo_root" "${tmpdir}/task-failure-classified"
+run_quota_backoff_written_case "$repo_root" "${tmpdir}/quota-backoff-written"
+run_quota_backoff_cleared_on_success_case "$repo_root" "${tmpdir}/quota-backoff-cleared"
+run_quota_backoff_exponential_case "$repo_root" "${tmpdir}/quota-backoff-exponential"
 echo "PASS: controller script checks"

@@ -116,3 +116,39 @@ classify_run_failure_from_file() {
 
   return 0
 }
+
+# Return 0 (true) if a log file contains quota-exhaustion or auth-failure
+# patterns that make immediate retry futile. Return 1 otherwise.
+#
+# Patterns are intentionally narrow: a false negative (quota not detected)
+# means normal scheduling; a false positive means a slightly delayed retry.
+# Both outcomes are acceptable — the goal is to break crash loops, not to
+# classify every failure perfectly.
+#
+# Usage:
+#   if classify_is_quota_auth_failure "$log_file"; then
+#     # apply backoff
+#   fi
+#
+# Arguments:
+#   $1 — path to a file containing run-once.sh stderr or container log output
+classify_is_quota_auth_failure() {
+  local file="$1"
+
+  [ -s "$file" ] || return 1
+
+  # Generic quota/rate-limit patterns (all providers)
+  grep -qiF "quota exhausted"          "$file" 2>/dev/null && return 0
+  grep -qF  "TerminalQuotaError"       "$file" 2>/dev/null && return 0
+  grep -qF  "429 Too Many Requests"    "$file" 2>/dev/null && return 0
+  grep -qF  "rate_limit_exceeded"      "$file" 2>/dev/null && return 0
+  grep -qF  "billing_hard_limit"       "$file" 2>/dev/null && return 0
+
+  # Generic auth/token patterns (all providers)
+  grep -qiF "authentication failed"    "$file" 2>/dev/null && return 0
+  grep -qiF "auth error"               "$file" 2>/dev/null && return 0
+  grep -qiF "token expired"            "$file" 2>/dev/null && return 0
+  grep -qiF "billing"                  "$file" 2>/dev/null && return 0
+
+  return 1
+}

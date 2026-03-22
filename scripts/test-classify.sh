@@ -163,4 +163,78 @@ if [ "$result" != "Kilo provider API key (ANTHROPIC_API_KEY) is missing for KILO
   fail "Kilo pattern must take priority over standalone provider pattern (got: ${result})"
 fi
 
+# ── classify_is_quota_auth_failure tests ────────────────────────────────────
+
+echo "Running classify_is_quota_auth_failure tests"
+
+assert_quota() {
+  local label="$1"
+  local file="$2"
+  if ! classify_is_quota_auth_failure "$file"; then
+    fail "classify_is_quota_auth_failure: expected MATCH for: ${label}"
+  fi
+}
+
+assert_not_quota() {
+  local label="$1"
+  local file="$2"
+  if classify_is_quota_auth_failure "$file"; then
+    fail "classify_is_quota_auth_failure: expected NO match for: ${label}"
+  fi
+}
+
+# empty / missing → not quota
+assert_not_quota "nonexistent file" "${tmp}/nonexistent-quota"
+touch "${tmp}/empty-quota"
+assert_not_quota "empty file" "${tmp}/empty-quota"
+
+# quota exhausted (case-insensitive)
+printf 'quota exhausted\n' > "${tmp}/q-exhausted"
+assert_quota "quota exhausted" "${tmp}/q-exhausted"
+
+printf 'QUOTA EXHAUSTED\n' > "${tmp}/q-exhausted-upper"
+assert_quota "quota exhausted (upper)" "${tmp}/q-exhausted-upper"
+
+# TerminalQuotaError (Gemini)
+printf 'TerminalQuotaError: daily quota exceeded\n' > "${tmp}/q-terminal"
+assert_quota "TerminalQuotaError" "${tmp}/q-terminal"
+
+# 429 Too Many Requests
+printf 'HTTP 429 Too Many Requests\n' > "${tmp}/q-429"
+assert_quota "429 Too Many Requests" "${tmp}/q-429"
+
+# Codex rate_limit_exceeded
+printf '{"type":"error","code":"rate_limit_exceeded"}\n' > "${tmp}/q-rle"
+assert_quota "rate_limit_exceeded" "${tmp}/q-rle"
+
+# Codex billing_hard_limit
+printf '{"code":"billing_hard_limit_reached"}\n' > "${tmp}/q-billing"
+assert_quota "billing_hard_limit" "${tmp}/q-billing"
+
+# authentication failed (case-insensitive)
+printf 'Authentication failed: invalid token\n' > "${tmp}/q-auth-fail"
+assert_quota "authentication failed" "${tmp}/q-auth-fail"
+
+# auth error
+printf 'auth error: credentials rejected\n' > "${tmp}/q-auth-err"
+assert_quota "auth error" "${tmp}/q-auth-err"
+
+# token expired
+printf 'token expired, please re-authenticate\n' > "${tmp}/q-token-exp"
+assert_quota "token expired" "${tmp}/q-token-exp"
+
+# billing
+printf 'billing limit reached for this account\n' > "${tmp}/q-billing-generic"
+assert_quota "billing" "${tmp}/q-billing-generic"
+
+# unrelated failure → not quota
+printf 'Some completely unknown failure\n' > "${tmp}/q-unknown"
+assert_not_quota "unknown error" "${tmp}/q-unknown"
+
+printf 'Failed to clone repository\n' > "${tmp}/q-clone"
+assert_not_quota "clone failure" "${tmp}/q-clone"
+
+printf 'ANTHROPIC_API_KEY is required\n' > "${tmp}/q-apikey"
+assert_not_quota "missing api key" "${tmp}/q-apikey"
+
 echo "All lib-classify.sh tests passed."
