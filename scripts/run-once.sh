@@ -1273,11 +1273,22 @@ if [ -n "${HEALTH_REPORT_URL:-}" ]; then
     _run_summary="$(extract_run_summary_from_log "$provider" "$last_command_log")" || true
   fi
 
+  # Extract log tail for failure diagnostics (best-effort; empty string on success or when log unavailable).
+  # Gated by HEALTH_REPORT_ERROR_DETAIL=1 (default off) to avoid sending the field to backends
+  # that don't yet have error_detail in their HealthReport schema.
+  # Log tails may contain agent output fragments; treat the health endpoint as appropriately access-controlled.
+  _error_detail=""
+  if [ "${HEALTH_REPORT_ERROR_DETAIL:-0}" = "1" ] && [ "$_run_outcome" = "failure" ] && [ -f "${log_file:-}" ]; then
+    _error_detail="$(tail -n 20 "$log_file" \
+      | sed 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\x1b[^[]*[A-Za-z]//g' \
+      | head -c 2048)" || true
+  fi
+
   report_health_to_backend \
     "$agent_name" "$target_repo" "${HIVEMOOT_AGENT_TOKEN:-}" \
     "$run_id" "$_run_outcome" "$run_duration_secs" "${_consecutive_failures:-0}" \
     "$exit_code" "${_run_error:-}" "$_next_run_at" \
-    "${RUN_TRIGGER_TYPE:-manual}" "$_token_usage_json" "$_run_summary" || true
+    "${RUN_TRIGGER_TYPE:-manual}" "$_token_usage_json" "$_run_summary" "$_error_detail" || true
 fi
 
 if [ -n "${last_command_log:-}" ] && [ "$last_command_log" != "$log_file" ] && [ -f "$last_command_log" ]; then

@@ -30,7 +30,7 @@ _VALID_OUTCOMES="success failure timeout"
 _VALID_TRIGGERS="scheduled mention manual task"
 
 # Allowed payload fields (sorted). Must match backend HealthReport.
-_ALLOWED_FIELDS="agent_id consecutive_failures duration_secs error exit_code next_run_at outcome repo run_id run_summary token_usage trigger"
+_ALLOWED_FIELDS="agent_id consecutive_failures duration_secs error error_detail exit_code next_run_at outcome repo run_id run_summary token_usage trigger"
 
 # Build the JSON payload for the health report.
 # Requires jq.
@@ -47,6 +47,7 @@ _build_health_payload() {
   local trigger="${10:-}"
   local token_usage_json="${11:-}"
   local run_summary="${12:-}"
+  local error_detail="${13:-}"
 
   local jq_args=(
     -n
@@ -92,6 +93,10 @@ _build_health_payload() {
   if [ -n "$run_summary" ]; then
     jq_args+=(--arg run_summary "$run_summary")
     jq_filter="${jq_filter} + {run_summary: \$run_summary}"
+  fi
+  if [ -n "$error_detail" ]; then
+    jq_args+=(--arg error_detail "$error_detail")
+    jq_filter="${jq_filter} + {error_detail: \$error_detail}"
   fi
 
   jq "${jq_args[@]}" "$jq_filter"
@@ -321,6 +326,7 @@ _sleep_with_jitter() {
 #   trigger              — "scheduled" | "mention" | "manual" | "task" (optional)
 #   token_usage_json     — JSON object with token usage data (optional)
 #   run_summary          — plain-text summary of what the agent did (optional, max ~1500 bytes)
+#   error_detail         — log tail for failure diagnostics (optional, ANSI-stripped, max 2048 bytes)
 report_health_to_backend() {
   local agent_id="$1"
   local repo="$2"
@@ -335,6 +341,7 @@ report_health_to_backend() {
   local trigger="${11:-}"
   local token_usage_json="${12:-}"
   local run_summary="${13:-}"
+  local error_detail="${14:-}"
 
   if [ -z "$HEALTH_REPORT_URL" ]; then
     return 0
@@ -363,7 +370,8 @@ report_health_to_backend() {
     "$next_run_at" \
     "$trigger" \
     "$token_usage_json" \
-    "$run_summary"
+    "$run_summary" \
+    "$error_detail"
   )"
 
   if ! _validate_health_payload "$payload"; then

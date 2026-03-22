@@ -261,6 +261,29 @@ test_payload_omits_empty_run_summary() {
   pass "payload omits empty run_summary"
 }
 
+test_payload_optional_error_detail() {
+  source_reporter
+  local payload
+  payload="$(_build_health_payload "a" "owner/repo" "run-1" "failure" "10" "1" "1" "run_failed" "" "" "" "" "fatal: could not read Remote")"
+  local has_detail
+  has_detail="$(printf '%s' "$payload" | jq 'has("error_detail")')"
+  [ "$has_detail" = "true" ] || fail "expected error_detail field when provided"
+  local detail_val
+  detail_val="$(printf '%s' "$payload" | jq -r '.error_detail')"
+  [ "$detail_val" = "fatal: could not read Remote" ] || fail "expected correct error_detail value, got '${detail_val}'"
+  pass "payload includes optional error_detail"
+}
+
+test_payload_omits_empty_error_detail() {
+  source_reporter
+  local payload
+  payload="$(_build_health_payload "a" "owner/repo" "run-1" "failure" "10" "1" "1" "run_failed" "" "" "" "" "")"
+  local has_detail
+  has_detail="$(printf '%s' "$payload" | jq 'has("error_detail")')"
+  [ "$has_detail" = "false" ] || fail "expected error_detail to be omitted when empty"
+  pass "payload omits empty error_detail"
+}
+
 # ── validation tests ─────────────────────────────────────────────
 
 test_validates_missing_agent_id() {
@@ -1158,6 +1181,8 @@ run_test test_payload_includes_token_usage
 run_test test_payload_omits_token_usage_when_empty
 run_test test_payload_optional_run_summary
 run_test test_payload_omits_empty_run_summary
+run_test test_payload_optional_error_detail
+run_test test_payload_omits_empty_error_detail
 echo ""
 
 echo "  Validation — required fields:"
