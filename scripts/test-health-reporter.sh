@@ -289,11 +289,13 @@ test_extract_error_detail_strips_ansi() {
   local tmplog
   tmplog="$(mktemp)"
   # Write a log line with CSI color codes, OSC+BEL hyperlink, OSC+ST hyperlink, and a bare ESC sequence.
-  printf '\033[0;32mok\033[0m\n' >> "$tmplog"
-  printf '\033]8;;https://example.com\007link text\033]8;;\007\n' >> "$tmplog"
-  printf '\033]8;;https://example.com\033\\link text\033]8;;\033\\\n' >> "$tmplog"
-  printf '\033Mreverse-linefeed\n' >> "$tmplog"
-  printf 'plain line\n' >> "$tmplog"
+  {
+    printf '\033[0;32mok\033[0m\n'
+    printf '\033]8;;https://example.com\007link text\033]8;;\007\n'
+    printf '\033]8;;https://example.com\033\\link text\033]8;;\033\\\n'
+    printf '\033Mreverse-linefeed\n'
+    printf 'plain line\n'
+  } >> "$tmplog"
 
   local result
   result="$(_extract_health_error_detail_from_log "$tmplog")"
