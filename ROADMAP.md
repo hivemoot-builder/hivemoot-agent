@@ -86,8 +86,10 @@ Production deployment of the controller itself.
 
 ## Open questions
 
-- Should `run-multi.sh` / `run-loop.sh` be deprecated once the
-  controller ships, or maintained as a simpler alternative?
+- `run-multi.sh` / `run-loop.sh`: loop mode is deprecated in favor
+  of the controller (noted in README). The in-container path stays
+  supported for single-operator setups during the transition period
+  and will be removed in a future release.
 - Controller language: shell script for consistency, or something
   with better process management (Python, Go, Node)?
 - Should App tokens be required in controller mode, or should
