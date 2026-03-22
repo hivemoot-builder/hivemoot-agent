@@ -451,6 +451,7 @@ spawn_worker() {
   append_env_if_set HEALTH_REPORT_TIMEOUT_SECS
   append_env_if_set HEALTH_REPORT_MAX_RETRIES
   append_env_if_set HEALTH_REPORT_RUN_SUMMARY
+  append_env_if_set AGENT_CONSECUTIVE_FAILURES
 
   append_secret_env HIVEMOOT_AGENT_TOKEN
   append_secret_env OPENAI_API_KEY
@@ -1404,13 +1405,16 @@ record_job_completion() {
     if [ "$ack_successful" -eq 1 ]; then
       completed_jobs=$((completed_jobs + 1))
       final_state="done"
+      agent_consecutive_failures[$agent_id]=0
       log "Job completed: id=${job_id} repo=${repo} agent=${agent_id}"
     else
       failed_jobs=$((failed_jobs + 1))
+      agent_consecutive_failures[$agent_id]=$(( ${agent_consecutive_failures[$agent_id]:-0} + 1 ))
       log "Job failed: id=${job_id} repo=${repo} agent=${agent_id} ack_failed=1"
     fi
   else
     failed_jobs=$((failed_jobs + 1))
+    agent_consecutive_failures[$agent_id]=$(( ${agent_consecutive_failures[$agent_id]:-0} + 1 ))
     log "Job failed: id=${job_id} repo=${repo} agent=${agent_id} exit=${exit_code}"
   fi
 
@@ -1675,6 +1679,8 @@ launch_job() {
   fi
 
   (
+    AGENT_CONSECUTIVE_FAILURES="${agent_consecutive_failures[$agent_id]:-0}"
+    export AGENT_CONSECUTIVE_FAILURES
     run_job "$job_id" "$repo" "$agent_id" "$trigger_type" "$extra_prompt" "$session_key" "$task_id" "$task_prompt" "$task_claim_token" "$task_messages_json"
   ) &
 
@@ -2146,6 +2152,7 @@ declare -A pid_to_state_file=()
 declare -A pid_to_processing_file=()
 declare -A agent_token_files=()
 declare -A repo_lock_files=()
+declare -A agent_consecutive_failures=()
 
 case "$controller_mode" in
   once|loop) ;;

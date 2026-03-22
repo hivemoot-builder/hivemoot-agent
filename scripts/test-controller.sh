@@ -2664,6 +2664,78 @@ run_task_failure_report_classified_error_case() {
 }
 
 
+run_consecutive_failures_forwarded_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local controller_pid=""
+  local controller_log=""
+  local run_log=""
+  local deadline=0
+  local line_count=0
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+
+  controller_log="${case_dir}/controller.log"
+  # Run in loop mode with a 1-second interval so two periodic cycles fire quickly.
+  # MOCK_DOCKER_WAIT_EXIT=1 makes every job fail so the consecutive counter grows.
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_DOCKER_WAIT_SLEEP_SECS="0" \
+    MOCK_DOCKER_WAIT_EXIT="1" \
+    TARGET_REPO="owner/repo" \
+    CONTROLLER_RUN_MODE="loop" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    PERIODIC_INTERVAL_SECS="1" \
+    PERIODIC_JITTER_SECS="0" \
+    bash "${repo_root}/scripts/controller.sh" >"$controller_log" 2>&1 &
+  controller_pid=$!
+
+  run_log="${case_dir}/mock-state/docker-run.log"
+  deadline=$((SECONDS + 20))
+  while true; do
+    if [ -f "$run_log" ]; then
+      line_count="$(wc -l < "$run_log" | tr -d '[:space:]')"
+      if [ "$line_count" -ge 2 ]; then
+        break
+      fi
+    fi
+    if ! kill -0 "$controller_pid" 2>/dev/null; then
+      sed 's/^/  /' "$controller_log" >&2 || true
+      fail "controller exited before two runs were observed"
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      sed 's/^/  /' "$controller_log" >&2 || true
+      fail "timed out waiting for two periodic runs"
+    fi
+    sleep 0.1
+  done
+
+  kill -TERM "$controller_pid" 2>/dev/null || true
+  wait "$controller_pid" 2>/dev/null || true
+
+  # First run: fresh state — consecutive count must be 0.
+  first_line="$(sed -n '1p' "$run_log")"
+  if ! echo "$first_line" | grep -qF "AGENT_CONSECUTIVE_FAILURES=0"; then
+    fail "first run must pass AGENT_CONSECUTIVE_FAILURES=0; got: ${first_line}"
+  fi
+
+  # Second run: after one failure — consecutive count must be 1.
+  second_line="$(sed -n '2p' "$run_log")"
+  if ! echo "$second_line" | grep -qF "AGENT_CONSECUTIVE_FAILURES=1"; then
+    fail "second run must pass AGENT_CONSECUTIVE_FAILURES=1; got: ${second_line}"
+  fi
+
+  echo "PASS: consecutive failure count is forwarded to worker containers in controller mode"
+}
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmpdir="$(mktemp -d "${repo_root}/.tmp-controller-test.XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -2715,4 +2787,5 @@ run_same_agent_concurrent_case "$repo_root" "${tmpdir}/same-agent-concurrent"
 run_periodic_deferral_cleanup_case "$repo_root" "${tmpdir}/periodic-deferral-cleanup"
 run_task_failure_report_case "$repo_root" "${tmpdir}/task-failure-report"
 run_task_failure_report_classified_error_case "$repo_root" "${tmpdir}/task-failure-classified"
+run_consecutive_failures_forwarded_case "$repo_root" "${tmpdir}/consecutive-failures-forwarded"
 echo "PASS: controller script checks"
