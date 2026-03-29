@@ -3,7 +3,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -16,46 +15,22 @@ pass() {
 
 # ── Shared setup ─────────────────────────────────────────────────────
 
-setup_env() {
-  local workdir="$1"
-  local mock_bin="${workdir}/mock-bin"
-  mkdir -p "$mock_bin"
-
-  # Default mock gh: validates user tokens, installation tokens, and repo access.
-  cat > "${mock_bin}/gh" <<'EOF'
-#!/usr/bin/env bash
-if [ "${1:-}" != "api" ]; then
-  echo "unexpected gh invocation: $*" >&2; exit 1
-fi
-case "${2:-}" in
-  user)         echo '{"login":"mock-user"}' ;;
-  installation) echo '{"id":1}' ;;
-  repos/*)      printf '{"full_name":"%s"}\n' "${2#repos/}" ;;
-  *)            echo "unexpected gh api: ${2:-}" >&2; exit 1 ;;
-esac
-EOF
-
-  cat > "${mock_bin}/claude"   <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-  cat > "${mock_bin}/hivemoot" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-
-  chmod +x "${mock_bin}/gh" "${mock_bin}/claude" "${mock_bin}/hivemoot"
-
+# Create a temp workdir with the minimal structure preflight_check_common needs.
+# Uses the system temp dir — no exec-capable filesystem required since no
+# mock binaries are written here.
+setup_workdir() {
+  local workdir
+  workdir="$(mktemp -d)"
   mkdir -p "${workdir}/skills"
   printf 'prompt\n' > "${workdir}/prompt.md"
+  echo "$workdir"
 }
 
 # Source lib.sh under test, then stub out helpers that live in other modules
 # or that exercise logic outside preflight_check_common's own scope.
+# CLI tools (gh, claude, hivemoot) are stubbed as shell functions so no
+# exec-capable filesystem is required.
 load_lib() {
-  local workdir="$1"
-  local mock_bin="${workdir}/mock-bin"
-
   # Force a fresh load even if HIVEMOOT_LIB_LOADED is set in the caller's
   # environment; without this the guard in lib.sh returns early and
   # preflight_check_common is never defined.
@@ -75,8 +50,22 @@ load_lib() {
   # preflight_check_agent_skill_lists: lives in lib-slots.sh; stub here
   preflight_check_agent_skill_lists() { return 0; }
 
-  export PATH="${mock_bin}:${PATH}"
-  hash -r
+  # Stub CLI tools as shell functions so tests run on any filesystem mount,
+  # including noexec worktrees.  preflight_check_common uses `command -v` to
+  # probe for these names; bash resolves shell functions via `command -v`, so
+  # defining them here makes the existence checks pass without any real binary.
+  gh() {
+    # Default: accepts user tokens, installation tokens, and repo access.
+    if [ "${1:-}" != "api" ]; then return 1; fi
+    case "${2:-}" in
+      user)         echo '{"login":"mock-user"}' ;;
+      installation) echo '{"id":1}' ;;
+      repos/*)      printf '{"full_name":"%s"}\n' "${2#repos/}" ;;
+      *)            return 1 ;;
+    esac
+  }
+  claude()   { return 0; }
+  hivemoot() { return 0; }
 }
 
 # Minimal global arrays consumed by preflight_check_common.
@@ -89,11 +78,10 @@ make_agent_globals() {
 
 test_passes_with_valid_inputs() {
   local workdir
-  workdir="$(mktemp -d "${REPO_ROOT}/.tmp-preflight-test.XXXXXX")"
+  workdir="$(setup_workdir)"
   trap 'rm -rf "$workdir"' EXIT
 
-  setup_env "$workdir"
-  load_lib "$workdir"
+  load_lib
   make_agent_globals
 
   if ! preflight_check_common \
@@ -110,11 +98,10 @@ test_passes_with_valid_inputs() {
 
 test_fails_missing_provider_cli() {
   local workdir
-  workdir="$(mktemp -d "${REPO_ROOT}/.tmp-preflight-test.XXXXXX")"
+  workdir="$(setup_workdir)"
   trap 'rm -rf "$workdir"' EXIT
 
-  setup_env "$workdir"
-  load_lib "$workdir"
+  load_lib
   make_agent_globals
 
   # Use a provider name that is certainly not installed anywhere.
@@ -144,11 +131,10 @@ test_fails_missing_provider_cli() {
 
 test_fails_missing_prompt_file() {
   local workdir
-  workdir="$(mktemp -d "${REPO_ROOT}/.tmp-preflight-test.XXXXXX")"
+  workdir="$(setup_workdir)"
   trap 'rm -rf "$workdir"' EXIT
 
-  setup_env "$workdir"
-  load_lib "$workdir"
+  load_lib
   make_agent_globals
 
   if preflight_check_common \
@@ -165,11 +151,10 @@ test_fails_missing_prompt_file() {
 
 test_requires_hivemoot_cli_when_flag_set() {
   local workdir
-  workdir="$(mktemp -d "${REPO_ROOT}/.tmp-preflight-test.XXXXXX")"
+  workdir="$(setup_workdir)"
   trap 'rm -rf "$workdir"' EXIT
 
-  setup_env "$workdir"
-  load_lib "$workdir"
+  load_lib
   make_agent_globals
 
   # Stub hivemoot to not exist in the search path used by preflight_check_common.
@@ -197,11 +182,10 @@ test_requires_hivemoot_cli_when_flag_set() {
 
 test_does_not_require_hivemoot_cli_when_flag_unset() {
   local workdir
-  workdir="$(mktemp -d "${REPO_ROOT}/.tmp-preflight-test.XXXXXX")"
+  workdir="$(setup_workdir)"
   trap 'rm -rf "$workdir"' EXIT
 
-  setup_env "$workdir"
-  load_lib "$workdir"
+  load_lib
   make_agent_globals
 
   # Stub hivemoot to not exist; should not matter when require_hivemoot=0.
@@ -228,26 +212,23 @@ test_does_not_require_hivemoot_cli_when_flag_unset() {
 
 test_watch_mentions_rejects_non_user_token() {
   local workdir
-  workdir="$(mktemp -d "${REPO_ROOT}/.tmp-preflight-test.XXXXXX")"
+  workdir="$(setup_workdir)"
   trap 'rm -rf "$workdir"' EXIT
 
-  setup_env "$workdir"
-  # Override gh: user endpoint fails, installation endpoint succeeds.
-  cat > "${workdir}/mock-bin/gh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-if [ "${1:-}" != "api" ]; then exit 1; fi
-case "${2:-}" in
-  user)         exit 1 ;;
-  installation) echo '{"id":1}' ;;
-  repos/*)      printf '{"full_name":"%s"}\n' "${2#repos/}" ;;
-  *)            exit 1 ;;
-esac
-EOF
-  chmod +x "${workdir}/mock-bin/gh"
-
-  load_lib "$workdir"
+  load_lib
   make_agent_globals
+
+  # Override gh stub: user endpoint fails, installation endpoint succeeds.
+  # Redefined as a function — no file write or exec-capable mount needed.
+  gh() {
+    if [ "${1:-}" != "api" ]; then return 1; fi
+    case "${2:-}" in
+      user)         return 1 ;;
+      installation) echo '{"id":1}' ;;
+      repos/*)      printf '{"full_name":"%s"}\n' "${2#repos/}" ;;
+      *)            return 1 ;;
+    esac
+  }
 
   if preflight_check_common \
       "claude" "auto" "${workdir}/prompt.md" \
@@ -266,13 +247,10 @@ test_return_code_correct_with_many_failures() {
   # returning "$failures" when failures == 256 wraps to 0 (success).
   # preflight_check_common must return 1 for any nonzero failure count.
   local workdir
-  workdir="$(mktemp -d "${REPO_ROOT}/.tmp-preflight-test.XXXXXX")"
+  workdir="$(setup_workdir)"
   trap 'rm -rf "$workdir"' EXIT
 
-  setup_env "$workdir"
-  # Override preflight_check_provider_auth to report 255 failures,
-  # then the missing CLI check adds 1 more → total 256.
-  load_lib "$workdir"
+  load_lib
 
   # Redefine after sourcing to inject 255 failures.
   preflight_check_provider_auth() {
