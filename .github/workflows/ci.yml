@@ -31,7 +31,6 @@ jobs:
               - '.github/workflows/ci.yml'
             dockerfile:
               - 'Dockerfile'
-              - '.hadolint.yaml'
               - '.github/workflows/ci.yml'
 
   shellcheck:
