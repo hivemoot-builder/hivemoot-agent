@@ -3,7 +3,13 @@
 #
 # Dependencies (must be sourced before this file):
 #   scripts/lib.sh -- provides trim()
-#
+
+# lib-global-slots.sh is a sourced library; avoid "return" errors when run directly.
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
+  echo "scripts/lib-global-slots.sh is a library and should be sourced, not executed." >&2
+  exit 0
+fi
+
 # Idempotency guard: re-sourcing is a no-op.
 [ -n "${HIVEMOOT_LIB_GLOBAL_SLOTS_LOADED:-}" ] && return 0
 HIVEMOOT_LIB_GLOBAL_SLOTS_LOADED=1
