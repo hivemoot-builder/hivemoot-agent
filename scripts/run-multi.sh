@@ -8,6 +8,8 @@ log() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
+# shellcheck source=scripts/lib-slots.sh
+. "${SCRIPT_DIR}/lib-slots.sh"
 
 load_provider_secrets
 
@@ -38,12 +40,8 @@ if ! effective_auth_mode="$(resolve_effective_auth_mode "$provider" "$auth_mode"
   exit 1
 fi
 
-case "$launch_jitter_min" in
-  ''|*[!0-9]*) echo "LAUNCH_JITTER_MIN_SECS must be a non-negative integer" >&2; exit 1 ;;
-esac
-case "$launch_jitter_max" in
-  ''|*[!0-9]*) echo "LAUNCH_JITTER_MAX_SECS must be a non-negative integer" >&2; exit 1 ;;
-esac
+require_non_negative_integer LAUNCH_JITTER_MIN_SECS "$launch_jitter_min"
+require_non_negative_integer LAUNCH_JITTER_MAX_SECS "$launch_jitter_max"
 if [ "$launch_jitter_max" -lt "$launch_jitter_min" ]; then
   echo "LAUNCH_JITTER_MAX_SECS (${launch_jitter_max}) must be >= LAUNCH_JITTER_MIN_SECS (${launch_jitter_min})" >&2
   exit 1
@@ -54,13 +52,6 @@ validate_target_repo "$target_repo"
 
 declare -a temp_token_files=()
 shutdown_requested=0
-
-cleanup_temp_tokens() {
-  local path=""
-  for path in "${temp_token_files[@]-}"; do
-    rm -f "$path" 2>/dev/null || true
-  done
-}
 
 handle_shutdown() {
   if [ "$shutdown_requested" -eq 0 ]; then

@@ -8,6 +8,8 @@ log() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
+# shellcheck source=scripts/lib-classify.sh
+. "${SCRIPT_DIR}/lib-classify.sh"
 
 load_provider_secrets
 load_secret_from_file HIVEMOOT_AGENT_TOKEN
@@ -264,11 +266,16 @@ start_task_heartbeat_loop() {
   heartbeat_pid="$!"
 }
 
+run_stderr_file=""
 trap '
   stop_task_heartbeat_loop
   if [ -n "$task_messages_tmp_file" ]; then
     rm -f "$task_messages_tmp_file"
     task_messages_tmp_file=""
+  fi
+  if [ -n "$run_stderr_file" ]; then
+    rm -f "$run_stderr_file"
+    run_stderr_file=""
   fi
 ' EXIT
 
@@ -293,9 +300,10 @@ validate_target_repo "$task_repo"
 
 result_path="${workspace_root}/task-output/${task_id}/result.md"
 
-# Task mode always starts fresh context to avoid cross-task bleed.
-export SESSION_RESUME=0
-unset AGENT_SESSION_KEY || true
+# Task follow-ups reuse the normal session lifecycle unless explicitly disabled.
+# Always switch to a task-scoped key so inherited mention-thread keys cannot
+# leak into task mode and resume the wrong provider session.
+export AGENT_SESSION_KEY="task:${task_id}"
 
 # Task mode uses the task prompt (AGENT_EXTRA_PROMPT) as its full instruction
 # set — role resolution via `hivemoot role <name>` is not needed and would fail
@@ -389,13 +397,16 @@ if [ -d "$log_dir" ]; then
 fi
 
 run_exit_code=0
+run_stderr_file="$(mktemp)"
 start_task_heartbeat_loop
-if "$run_once_script"; then
+if "$run_once_script" 2>"$run_stderr_file"; then
   run_exit_code=0
 else
   run_exit_code=$?
 fi
 stop_task_heartbeat_loop
+# Re-emit stderr so it appears in container/terminal logs.
+cat "$run_stderr_file" >&2
 
 latest_log=""
 if [ -d "$log_dir" ]; then
@@ -445,18 +456,37 @@ extract_codex_result_markdown() {
   fi
 }
 
-# For Gemini and Claude in task mode, --output-format text makes the log the
-# raw answer. Read it directly without any JSON parsing.
-# Assumption: run-once.sh captures provider output via `2>&1 | tee -a "$log_file"`,
-# so log_path contains both stdout and stderr. For text mode without --verbose,
-# stderr is expected empty in practice for both CLIs, making the whole log safe
-# to use as the result. If a future CLI change produces non-empty stderr in text
-# mode, the prefix lines would appear in the posted result — revisit then.
+# Gemini task mode still logs plain text, so the log is the raw answer.
 extract_text_result_from_log() {
   local log_path="$1"
   if [ -f "$log_path" ] && [ -s "$log_path" ]; then
     cat "$log_path"
   fi
+}
+
+extract_claude_result_markdown() {
+  local log_path="$1"
+  local encoded_result=""
+
+  if [ ! -f "$log_path" ]; then
+    return 0
+  fi
+
+  encoded_result="$(
+    jq -Rr '
+      fromjson?
+      | select(.type=="result")
+      | .result // empty
+      | @base64
+    ' "$log_path" | tail -n 1
+  )"
+
+  if [ -n "$encoded_result" ]; then
+    printf '%s\n' "$encoded_result" | jq -Rr '@base64d'
+    return 0
+  fi
+
+  extract_text_result_from_log "$log_path"
 }
 
 extract_task_result_markdown() {
@@ -467,8 +497,11 @@ extract_task_result_markdown() {
     codex)
       extract_codex_result_markdown "$log_path"
       ;;
-    gemini|claude)
+    gemini)
       extract_text_result_from_log "$log_path"
+      ;;
+    claude)
+      extract_claude_result_markdown "$log_path"
       ;;
     *)
       return 0
@@ -476,10 +509,65 @@ extract_task_result_markdown() {
   esac
 }
 
+# Scans a Codex JSONL log for auth errors and prints a code or description to
+# stdout. Returns 0 if an auth error is found, 1 otherwise.
+#
+# Codex exits 0 even when the API rejects the request with an auth error.
+# Auth failures appear in two shapes depending on Codex version:
+#   - {"type":"error","code":"...","message":"..."} (explicit code field)
+#   - {"type":"error","error":{"code":"...","message":"..."}} (nested code)
+#   - {"type":"error","message":"Unauthorized"} (message only, no code)
+#   - {"type":"turn.failed","error":{"message":"Unauthorized"}} (turn event)
+# Without this check, such runs would be reported as action=complete.
+detect_codex_auth_error() {
+  local log_path="$1"
+  local error_code=""
+
+  [ -f "$log_path" ] || return 1
+
+  error_code="$(jq -Rr '
+    fromjson?
+    | select(.type == "error" or .type == "turn.failed")
+    | (
+        (.error.code // .code) as $code |
+        ((.message // .error.message // "") |
+          if test("Unauthorized|Invalid API key|Incorrect API key"; "i")
+          then "auth_error"
+          else null end) as $msg_code |
+        ($code // $msg_code)
+      )
+    | select(. != null)
+    | select(
+        . == "refresh_token_reused" or
+        . == "invalid_api_key" or
+        . == "token_expired" or
+        . == "auth_error" or
+        startswith("auth_")
+      )
+  ' "$log_path" | head -1)"
+
+  if [ -n "$error_code" ]; then
+    printf '%s\n' "$error_code"
+    return 0
+  fi
+  return 1
+}
+
 provider_name="${AGENT_PROVIDER:-unknown}"
 task_result_markdown=""
 if [ "$run_exit_code" -eq 0 ] && [ -n "$latest_log" ] && [ -f "$latest_log" ]; then
   task_result_markdown="$(extract_task_result_markdown "$provider_name" "$latest_log")"
+fi
+
+# Detect Codex auth errors when exit code is 0 and no successful result was
+# extracted. Codex does not translate API auth errors into non-zero exits.
+auth_error_code=""
+if [ "$run_exit_code" -eq 0 ] && [ "$provider_name" = "codex" ] \
+    && [ -z "$task_result_markdown" ] && [ -n "$latest_log" ]; then
+  if auth_error_code="$(detect_codex_auth_error "$latest_log")"; then
+    log "Codex auth error detected in output: ${auth_error_code}; promoting to failure"
+    run_exit_code=1
+  fi
 fi
 
 complete_payload=""
@@ -519,6 +607,9 @@ mkdir -p "$(dirname "$result_path")"
   elif [ "$run_exit_code" -eq 124 ]; then
     echo
     echo "Execution timed out."
+  elif [ -n "$auth_error_code" ]; then
+    echo
+    echo "Provider authentication failed: ${auth_error_code}"
   else
     echo
     echo "Execution failed."
@@ -549,8 +640,15 @@ if [ "$run_exit_code" -eq 0 ]; then
   post_task_update complete "$result_payload" || true
 elif [ "$run_exit_code" -eq 124 ]; then
   post_task_update timeout "" || true
+elif [ -n "$auth_error_code" ]; then
+  post_task_update fail "Provider authentication failed: ${auth_error_code}" || true
 else
-  post_task_update fail "Task execution failed with exit code ${run_exit_code}" || true
+  _failure_reason="$(classify_run_failure_from_file "$run_stderr_file")"
+  if [ -n "$_failure_reason" ]; then
+    post_task_update fail "${_failure_reason} (exit code ${run_exit_code})" || true
+  else
+    post_task_update fail "Task execution failed with exit code ${run_exit_code}" || true
+  fi
 fi
 
 log "Task run finished: task_id=${task_id} exit_code=${run_exit_code} result_path=${result_path}"

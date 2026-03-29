@@ -24,6 +24,7 @@ extract_claude_token_usage_from_log() {
   if [ ! -f "$path" ] || ! command -v jq >/dev/null 2>&1; then
     return 0
   fi
+  # Claude modelUsage uses camelCase keys (inputTokens, outputTokens, etc.)
   jq -Rrs '
     [split("\n")[] | select(length > 0) | try fromjson catch null | select(. != null)]
     | map(select(.type == "result")) | last
@@ -31,21 +32,21 @@ extract_claude_token_usage_from_log() {
       else
         (.modelUsage // {}) as $mu |
         {
-          input_tokens:                ([$mu | to_entries[].value.input_tokens               // 0] | add // null),
-          output_tokens:               ([$mu | to_entries[].value.output_tokens              // 0] | add // null),
-          cache_read_input_tokens:     ([$mu | to_entries[].value.cache_read_input_tokens    // 0] | add // null),
-          cache_creation_input_tokens: ([$mu | to_entries[].value.cache_creation_input_tokens // 0] | add // null),
+          input_tokens:                ([$mu | to_entries[].value | (.inputTokens // .input_tokens // 0)] | add // null),
+          output_tokens:               ([$mu | to_entries[].value | (.outputTokens // .output_tokens // 0)] | add // null),
+          cache_read_input_tokens:     ([$mu | to_entries[].value | (.cacheReadInputTokens // .cache_read_input_tokens // 0)] | add // null),
+          cache_creation_input_tokens: ([$mu | to_entries[].value | (.cacheCreationInputTokens // .cache_creation_input_tokens // 0)] | add // null),
           cost_usd:  (.total_cost_usd // null),
           num_turns: (.num_turns // null),
           model_breakdown: (
             if ($mu | keys | length) > 0 then
               $mu | with_entries(.value = (
                 .value | {
-                  input_tokens:                .input_tokens,
-                  output_tokens:               .output_tokens,
-                  cache_read_input_tokens:     .cache_read_input_tokens,
-                  cache_creation_input_tokens: .cache_creation_input_tokens,
-                  cost_usd:                    .cost_usd
+                  input_tokens:                (.inputTokens // .input_tokens),
+                  output_tokens:               (.outputTokens // .output_tokens),
+                  cache_read_input_tokens:     (.cacheReadInputTokens // .cache_read_input_tokens),
+                  cache_creation_input_tokens: (.cacheCreationInputTokens // .cache_creation_input_tokens),
+                  cost_usd:                    (.costUSD // .cost_usd)
                 } | with_entries(select(.value != null))
               ))
             else null end
@@ -71,12 +72,62 @@ extract_codex_token_usage_from_log() {
     | if length == 0 then empty
       else
         {
-          input_tokens:            ([.[].usage.input_tokens          // 0] | add),
-          output_tokens:           ([.[].usage.output_tokens         // 0] | add),
-          cache_read_input_tokens: ([.[].usage.cached_input_tokens   // 0] | add),
-          num_turns:               length
+          input_tokens:                ([.[].usage.input_tokens          // 0] | add),
+          output_tokens:               ([.[].usage.output_tokens         // 0] | add),
+          cache_read_input_tokens:     ([.[].usage.cached_input_tokens   // 0] | add),
+          cache_creation_input_tokens: null,
+          cost_usd:                    null,
+          num_turns:                   length
         }
-        | with_entries(select(.value != null))
       end
   ' "$path" 2>/dev/null || true
+}
+
+# Extract a run summary string from the provider's NDJSON log.
+# Best-effort: returns empty string on failure, missing file, or unsupported provider.
+# Output is capped at max_bytes (default 1500) to stay within health payload budget.
+#
+# Claude:  reads .result from the final type=="result" stream-JSON event.
+# Codex:   reads .text from the last item.completed agent_message event.
+# Others:  returns empty (skip).
+extract_run_summary_from_log() {
+  local provider="$1"
+  local path="$2"
+  local max_bytes="${3:-1500}"
+
+  if [ ! -f "$path" ] || ! command -v jq >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local raw=""
+  case "$provider" in
+    claude)
+      raw="$(jq -Rrs '
+        [split("\n")[] | select(length > 0) | try fromjson catch null | select(. != null)]
+        | map(select(.type == "result")) | last
+        | if . == null then empty else (.result // empty) end
+      ' "$path" 2>/dev/null)" || true
+      ;;
+    codex)
+      local encoded
+      encoded="$(jq -Rr '
+        fromjson?
+        | select(.type=="item.completed")
+        | .item
+        | select(.type=="agent_message")
+        | .text // empty
+        | @base64
+      ' "$path" 2>/dev/null | tail -n 1)" || true
+      if [ -n "$encoded" ]; then
+        raw="$(printf '%s\n' "$encoded" | jq -Rr '@base64d' 2>/dev/null)" || true
+      fi
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if [ -n "$raw" ]; then
+    printf '%s' "$raw" | head -c "$max_bytes"
+  fi
 }
