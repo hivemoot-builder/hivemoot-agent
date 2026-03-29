@@ -426,6 +426,7 @@ spawn_worker() {
     if [ -n "$task_execute_base_url" ]; then
       docker_run_args+=( -e "AGENT_TASK_EXECUTE_BASE_URL=${task_execute_base_url}" )
     fi
+    append_env_if_set AGENT_TASK_HEARTBEAT_INTERVAL_SECONDS
   fi
 
   append_env_if_set AGENT_PROVIDER
