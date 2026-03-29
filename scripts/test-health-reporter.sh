@@ -284,6 +284,19 @@ test_payload_omits_empty_error_detail() {
   pass "payload omits empty error_detail"
 }
 
+test_payload_error_detail_on_timeout_outcome() {
+  source_reporter
+  local payload
+  payload="$(_build_health_payload "a" "owner/repo" "run-1" "timeout" "1800" "0" "124" "timeout" "" "" "" "" "last lines before timeout")"
+  local has_detail
+  has_detail="$(printf '%s' "$payload" | jq 'has("error_detail")')"
+  [ "$has_detail" = "true" ] || fail "expected error_detail field when outcome is timeout"
+  local detail_val
+  detail_val="$(printf '%s' "$payload" | jq -r '.error_detail')"
+  [ "$detail_val" = "last lines before timeout" ] || fail "expected correct error_detail value for timeout, got '${detail_val}'"
+  pass "payload includes error_detail when outcome is timeout"
+}
+
 test_extract_error_detail_strips_ansi() {
   source_reporter
   local tmplog
@@ -301,8 +314,9 @@ test_extract_error_detail_strips_ansi() {
   result="$(_extract_health_error_detail_from_log "$tmplog")"
   rm -f "$tmplog"
 
-  # No ESC bytes should remain
-  if printf '%s' "$result" | grep -qP '\033'; then
+  # No ESC bytes should remain (use grep -F with a literal ESC byte for portability)
+  _esc="$(printf '\033')"
+  if printf '%s' "$result" | grep -qF "$_esc"; then
     fail "expected no ESC bytes after sanitization, got: $(printf '%s' "$result" | cat -v)"
   fi
   # Plain content should be preserved
@@ -1209,6 +1223,7 @@ run_test test_payload_optional_run_summary
 run_test test_payload_omits_empty_run_summary
 run_test test_payload_optional_error_detail
 run_test test_payload_omits_empty_error_detail
+run_test test_payload_error_detail_on_timeout_outcome
 run_test test_extract_error_detail_strips_ansi
 echo ""
 

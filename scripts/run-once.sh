@@ -1278,7 +1278,7 @@ if [ -n "${HEALTH_REPORT_URL:-}" ]; then
   # that don't yet have error_detail in their HealthReport schema.
   # Log tails may contain agent output fragments; treat the health endpoint as appropriately access-controlled.
   _error_detail=""
-  if [ "${HEALTH_REPORT_ERROR_DETAIL:-0}" = "1" ] && [ "$_run_outcome" = "failure" ] && [ -f "${log_file:-}" ]; then
+  if [ "${HEALTH_REPORT_ERROR_DETAIL:-0}" = "1" ] && { [ "$_run_outcome" = "failure" ] || [ "$_run_outcome" = "timeout" ]; } && [ -f "${log_file:-}" ]; then
     _error_detail="$(_extract_health_error_detail_from_log "$log_file")" || true
   fi
 
