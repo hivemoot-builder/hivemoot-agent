@@ -1015,6 +1015,7 @@ run_mentions_closed_pr_case() {
   local case_dir="$2"
   local controller_log="${case_dir}/controller.log"
   local mention_summary_count=""
+  local ack_log="${case_dir}/hivemoot-state/ack.log"
 
   mkdir -p "$case_dir"
   setup_mock_docker "${case_dir}/mock-bin"
@@ -1051,7 +1052,56 @@ run_mentions_closed_pr_case() {
 
   assert_file_contains "$controller_log" "skipping mention on closed thread #320"
 
+  assert_file_contains "$ack_log" "thread-320"
+
   echo "PASS: mention on closed PR thread is suppressed at enqueue time"
+}
+
+run_review_request_closed_pr_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local controller_log="${case_dir}/controller.log"
+  local review_summary_count=""
+  local ack_log="${case_dir}/hivemoot-state/ack.log"
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+  setup_mock_hivemoot "${case_dir}/mock-bin"
+  setup_mock_gh "${case_dir}/mock-bin"
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_DOCKER_WAIT_SLEEP_SECS="0" \
+    MOCK_HIVEMOOT_STATE_DIR="${case_dir}/hivemoot-state" \
+    MOCK_HIVEMOOT_WATCH_OUTPUT='{"threadId":"thread-320","number":320,"title":"merged PR","author":"hivemoot","url":"https://github.com/owner/repo/pull/320","timestamp":"2026-03-21T02:11:57Z"}' \
+    MOCK_GH_STATE_DIR="${case_dir}/gh-state" \
+    MOCK_GH_ISSUE_STATE="closed" \
+    TARGET_REPO="owner/repo" \
+    CONTROLLER_RUN_MODE="once" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    CONTROLLER_LOCK_DIR="${case_dir}/locks" \
+    CONTROLLER_TOKEN_TMP_ROOT="${case_dir}/token-tmp" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    WATCH_REVIEW_REQUESTS="1" \
+    WATCH_POLL_INTERVAL="30" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    PERIODIC_INTERVAL_SECS="60" \
+    PERIODIC_JITTER_SECS="0" \
+    bash "${repo_root}/scripts/controller.sh" >"$controller_log" 2>&1
+
+  review_summary_count="$(grep -R --include=summary -F 'trigger=github-review-request' "${case_dir}/workspace/workspaces" 2>/dev/null | wc -l | tr -d '[:space:]' || true)"
+  assert_eq "0" "$review_summary_count" "expected no review-request-triggered jobs for review request on closed PR"
+
+  assert_file_contains "$controller_log" "skipping review request on closed thread #320"
+
+  assert_file_contains "$ack_log" "thread-320"
+
+  echo "PASS: review request on closed PR thread is suppressed at enqueue time"
 }
 
 run_orphan_recovery_case() {
@@ -3131,6 +3181,7 @@ run_spawn_failure_cleanup_case "$repo_root" "${tmpdir}/spawn-failure"
 run_mentions_case "$repo_root" "${tmpdir}/mentions"
 run_mentions_dedup_case "$repo_root" "${tmpdir}/mentions-dedup"
 run_mentions_closed_pr_case "$repo_root" "${tmpdir}/mentions-closed-pr"
+run_review_request_closed_pr_case "$repo_root" "${tmpdir}/review-request-closed-pr"
 run_orphan_recovery_case "$repo_root" "${tmpdir}/orphan-recovery"
 run_mentions_retry_after_failure_case "$repo_root" "${tmpdir}/mentions-retry"
 run_task_watch_case "$repo_root" "${tmpdir}/task-watch"

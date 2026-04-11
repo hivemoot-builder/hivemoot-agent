@@ -149,6 +149,9 @@ enqueue_review_request_event() {
     thread_state="$(GH_TOKEN="$agent_token" gh api "repos/${target_repo}/issues/${number}" --jq '.state' 2>/dev/null || true)"
     if [ "$thread_state" = "closed" ]; then
       log "${agent_id}: skipping review request on closed thread #${display_number}"
+      if [ -n "$ack_key" ]; then
+        GH_TOKEN="$agent_token" hivemoot ack "$ack_key" --state-file "$state_file" >/dev/null 2>&1 || true
+      fi
       return 0
     fi
   fi
