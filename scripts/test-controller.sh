@@ -356,6 +356,33 @@ EOF_MOCK
   chmod +x "${mock_bin}/hivemoot"
 }
 
+setup_mock_gh() {
+  local mock_bin="$1"
+  mkdir -p "$mock_bin"
+
+  cat > "${mock_bin}/gh" <<'EOF_MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_dir="${MOCK_GH_STATE_DIR:?MOCK_GH_STATE_DIR is required}"
+mkdir -p "$state_dir"
+
+cmd="${1:-}"
+shift || true
+
+if [ "$cmd" = "api" ]; then
+  printf '%s\n' "$*" >> "${state_dir}/api.log"
+  printf '%s\n' "${MOCK_GH_ISSUE_STATE:-open}"
+  exit 0
+fi
+
+echo "unexpected gh invocation: ${cmd} $*" >&2
+exit 1
+EOF_MOCK
+
+  chmod +x "${mock_bin}/gh"
+}
+
 setup_mock_curl() {
   local mock_bin="$1"
   mkdir -p "$mock_bin"
@@ -981,6 +1008,50 @@ run_mentions_dedup_case() {
   assert_file_contains "$controller_log" "duplicate mention suppressed (ack_key=${expected_ack_key})"
 
   echo "PASS: duplicate mention events are suppressed by ack_key"
+}
+
+run_mentions_closed_pr_case() {
+  local repo_root="$1"
+  local case_dir="$2"
+  local controller_log="${case_dir}/controller.log"
+  local mention_summary_count=""
+
+  mkdir -p "$case_dir"
+  setup_mock_docker "${case_dir}/mock-bin"
+  setup_mock_hivemoot "${case_dir}/mock-bin"
+  setup_mock_gh "${case_dir}/mock-bin"
+
+  env -i \
+    PATH="${case_dir}/mock-bin:${PATH}" \
+    HOME="${case_dir}/home" \
+    MOCK_DOCKER_STATE_DIR="${case_dir}/mock-state" \
+    MOCK_DOCKER_WAIT_SLEEP_SECS="0" \
+    MOCK_HIVEMOOT_STATE_DIR="${case_dir}/hivemoot-state" \
+    MOCK_HIVEMOOT_WATCH_OUTPUT='{"threadId":"thread-320","number":320,"title":"merged PR","author":"hivemoot","body":"@hivemoot-worker check this","url":"https://github.com/owner/repo/pull/320#issuecomment-1","timestamp":"2026-03-17T05:22:00Z"}' \
+    MOCK_GH_STATE_DIR="${case_dir}/gh-state" \
+    MOCK_GH_ISSUE_STATE="closed" \
+    TARGET_REPO="owner/repo" \
+    CONTROLLER_RUN_MODE="once" \
+    CONTROLLER_MAX_WORKERS="1" \
+    CONTROLLER_WORKSPACE_ROOT="${case_dir}/workspace" \
+    CONTROLLER_LOCK_DIR="${case_dir}/locks" \
+    CONTROLLER_TOKEN_TMP_ROOT="${case_dir}/token-tmp" \
+    WORKER_IMAGE="hivemoot-agent:test" \
+    WATCH_MENTIONS="1" \
+    WATCH_POLL_INTERVAL="30" \
+    AGENT_ID_01="worker" \
+    AGENT_GITHUB_TOKEN_01="token-1" \
+    AGENT_TIMEOUT_SECONDS="120" \
+    PERIODIC_INTERVAL_SECS="60" \
+    PERIODIC_JITTER_SECS="0" \
+    bash "${repo_root}/scripts/controller.sh" >"$controller_log" 2>&1
+
+  mention_summary_count="$(grep -R --include=summary -F 'trigger=github-mention' "${case_dir}/workspace/workspaces" 2>/dev/null | wc -l | tr -d '[:space:]' || true)"
+  assert_eq "0" "$mention_summary_count" "expected no mention-triggered jobs for mention on closed PR"
+
+  assert_file_contains "$controller_log" "skipping mention on closed thread #320"
+
+  echo "PASS: mention on closed PR thread is suppressed at enqueue time"
 }
 
 run_orphan_recovery_case() {
@@ -3059,6 +3130,7 @@ run_failure_case "$repo_root" "${tmpdir}/failure"
 run_spawn_failure_cleanup_case "$repo_root" "${tmpdir}/spawn-failure"
 run_mentions_case "$repo_root" "${tmpdir}/mentions"
 run_mentions_dedup_case "$repo_root" "${tmpdir}/mentions-dedup"
+run_mentions_closed_pr_case "$repo_root" "${tmpdir}/mentions-closed-pr"
 run_orphan_recovery_case "$repo_root" "${tmpdir}/orphan-recovery"
 run_mentions_retry_after_failure_case "$repo_root" "${tmpdir}/mentions-retry"
 run_task_watch_case "$repo_root" "${tmpdir}/task-watch"

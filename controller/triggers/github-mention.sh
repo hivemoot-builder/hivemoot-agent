@@ -87,6 +87,7 @@ enqueue_mention_event() {
   local agent_id="$1"
   local state_file="$2"
   local line="$3"
+  local agent_token="${4:-}"
 
   local thread_id=""
   local number=""
@@ -131,6 +132,15 @@ enqueue_mention_event() {
     return 0
   fi
 
+  if [ -n "$number" ] && [ -n "$target_repo" ] && [ -n "$agent_token" ]; then
+    local thread_state=""
+    thread_state="$(GH_TOKEN="$agent_token" gh api "repos/${target_repo}/issues/${number}" --jq '.state' 2>/dev/null || true)"
+    if [ "$thread_state" = "closed" ]; then
+      log "${agent_id}: skipping mention on closed thread #${display_number}"
+      return 0
+    fi
+  fi
+
   if [ -n "$thread_id" ]; then
     mention_session_key="mention-thread:${thread_id}"
   elif [ -n "$number" ]; then
@@ -149,10 +159,11 @@ enqueue_mention_event() {
 consume_mention_stream() {
   local agent_id="$1"
   local state_file="$2"
+  local agent_token="${3:-}"
   local line=""
 
   while IFS= read -r line; do
-    enqueue_mention_event "$agent_id" "$state_file" "$line"
+    enqueue_mention_event "$agent_id" "$state_file" "$line" "$agent_token"
   done
 }
 
@@ -174,7 +185,7 @@ poll_mentions_once() {
       --repo "$target_repo" \
       --state-file "$state_file" \
       --interval "$watch_poll_interval" \
-      --once 2>&1 | consume_mention_stream "$agent_id" "$state_file"; then
+      --once 2>&1 | consume_mention_stream "$agent_id" "$state_file" "$agent_token"; then
       :
     else
       pipe_status=("${PIPESTATUS[@]}")
@@ -217,7 +228,7 @@ start_mention_watcher() {
       if GH_TOKEN="$agent_token" hivemoot watch \
         --repo "$target_repo" \
         --state-file "$state_file" \
-        --interval "$watch_poll_interval" 2>&1 | consume_mention_stream "$agent_id" "$state_file"; then
+        --interval "$watch_poll_interval" 2>&1 | consume_mention_stream "$agent_id" "$state_file" "$agent_token"; then
         :
       else
         pipe_status=("${PIPESTATUS[@]}")
