@@ -124,6 +124,116 @@ _github_resolve_default_branch() {
   return 1
 }
 
+_github_cache_identity_scope() {
+  # Returns a short, filesystem-safe string that identifies the credential
+  # used for this clone, so cache directories are scoped per-identity.
+  # Prevents cross-token data leakage when multiple agents share a host.
+  #
+  # Prefers github_login (stable, human-readable) when set.
+  # Falls back to the first 16 hex chars of sha256(token) for app tokens.
+  # Returns 1 (and nothing) if neither is available.
+  local login="${github_login:-}"
+  if [ -n "$login" ]; then
+    # github_login is already validated to [a-zA-Z0-9-] by github_auth().
+    printf '%s' "$login"
+    return 0
+  fi
+  local token="${github_token:-}"
+  if [ -n "$token" ]; then
+    printf '%s' "$token" | sha256sum | cut -c1-16
+    return 0
+  fi
+  return 1
+}
+
+_github_clone_with_reference_cache() {
+  # Maintain a per-identity bare mirror and clone with --reference for
+  # fast pack-object reuse. Fails open: any error returns 1 and the
+  # caller falls back to a direct clone.
+  #
+  # Args:
+  #   $1  cache_base_dir  — root directory for all mirrors
+  #   $2  askpass_path    — path to the GIT_ASKPASS helper script
+  #
+  # Reads (from caller scope): github_token, target_repo, repo_dir, clone_depth
+  local cache_base_dir="$1"
+  local askpass_path="$2"
+
+  local identity_scope
+  if ! identity_scope="$(_github_cache_identity_scope)"; then
+    log "Reference cache: no identity scope available; skipping"
+    return 1
+  fi
+
+  # target_repo is already validated to "owner/repo" by validate_target_repo().
+  local org="${target_repo%/*}"
+  local reponame="${target_repo#*/}"
+
+  local mirror_dir="${cache_base_dir}/${org}/${reponame}/${identity_scope}"
+  local lock_file="${mirror_dir}.lock"
+  local clone_url="https://github.com/${target_repo}.git"
+
+  # Ensure parent directory for lock file and mirror.
+  if ! mkdir -p "${cache_base_dir}/${org}/${reponame}" 2>/dev/null; then
+    log "Reference cache: cannot create ${cache_base_dir}/${org}/${reponame}"
+    return 1
+  fi
+
+  # Advisory lock: serialise mirror operations for agents sharing the cache dir.
+  # Subshell ensures the lock fd is released on exit regardless of outcome.
+  local mirror_exit
+  (
+    # shellcheck disable=SC2093  # exec in subshell, redirect intentional
+    exec 9>"$lock_file"
+    if ! flock -w 60 9; then
+      log "Reference cache: lock timeout waiting for ${mirror_dir}"
+      exit 1
+    fi
+
+    if [ ! -d "$mirror_dir" ]; then
+      log "Reference cache: creating bare mirror at ${mirror_dir}"
+      if GIT_ASKPASS="$askpass_path" GIT_PAT="$github_token" GIT_TERMINAL_PROMPT=0 \
+        git clone --bare --mirror "$clone_url" "$mirror_dir" 2>&1; then
+        exit 0
+      else
+        rm -rf "$mirror_dir"
+        log "Reference cache: mirror creation failed"
+        exit 1
+      fi
+    else
+      log "Reference cache: refreshing mirror at ${mirror_dir}"
+      # Non-fatal: a stale mirror still accelerates the clone; only log the failure.
+      GIT_ASKPASS="$askpass_path" GIT_PAT="$github_token" GIT_TERMINAL_PROMPT=0 \
+        git -C "$mirror_dir" fetch --prune origin 2>&1 \
+        || log "Reference cache: mirror refresh failed; cache may be stale"
+      exit 0
+    fi
+  )
+  mirror_exit=$?
+
+  if [ "$mirror_exit" -ne 0 ]; then
+    return 1
+  fi
+
+  # Clone working copy with --reference so pack objects resolve from the mirror.
+  local clone_args=(--single-branch --reference "$mirror_dir")
+  local depth_label="full"
+  if [ "${clone_depth:-0}" -gt 0 ]; then
+    clone_args+=(--depth "$clone_depth")
+    depth_label="$clone_depth"
+  fi
+
+  log "Reference cache: cloning with mirror reference (depth=${depth_label})"
+  if GIT_ASKPASS="$askpass_path" GIT_PAT="$github_token" GIT_TERMINAL_PROMPT=0 \
+    git clone "${clone_args[@]}" "$clone_url" "$repo_dir" 2>&1; then
+    return 0
+  fi
+
+  rm -rf "$repo_dir"
+  log "Reference cache: clone with --reference failed; caller will retry directly"
+  return 1
+}
+
 github_clone_or_sync() {
   local askpass
   askpass="$(mktemp)"
@@ -161,6 +271,15 @@ ASKPASS
   fi
 
   if [ ! -d "$repo_dir/.git" ]; then
+    # Try reference cache when GIT_CACHE_DIR is configured.
+    local git_cache_dir="${GIT_CACHE_DIR:-}"
+    if [ -n "$git_cache_dir" ] && \
+       _github_clone_with_reference_cache "$git_cache_dir" "$askpass"; then
+      rm -f "$askpass"
+      return 0
+    fi
+
+    # Direct clone (cache disabled, unavailable, or failed).
     local clone_args=(--single-branch)
     local depth_label="full"
     if [ "$clone_depth" -gt 0 ]; then
