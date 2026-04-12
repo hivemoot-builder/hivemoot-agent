@@ -115,9 +115,11 @@ test_identity_scope_returns_1_when_no_credentials() {
   github_login=""
   github_token=""
 
-  _github_cache_identity_scope \
-    && fail "expected return 1 with no credentials" \
-    || pass "identity scope returns 1 when no login and no token"
+  if _github_cache_identity_scope; then
+    fail "expected return 1 with no credentials"
+  else
+    pass "identity scope returns 1 when no login and no token"
+  fi
 }
 
 test_identity_scope_hash_is_deterministic() {
@@ -194,9 +196,11 @@ test_clone_fails_open_on_mirror_failure() {
   local askpass="${TEST_TMP}/askpass"
   touch "$askpass"
 
-  _github_clone_with_reference_cache "$cache_base" "$askpass" \
-    && fail "expected non-zero return when git fails" \
-    || pass "clone_with_reference_cache returns 1 when mirror creation fails"
+  if _github_clone_with_reference_cache "$cache_base" "$askpass"; then
+    fail "expected non-zero return when git fails"
+  else
+    pass "clone_with_reference_cache returns 1 when mirror creation fails"
+  fi
 }
 
 test_clone_fails_open_on_reference_clone_failure() {
@@ -215,9 +219,9 @@ test_clone_fails_open_on_reference_clone_failure() {
   local askpass="${TEST_TMP}/askpass"
   touch "$askpass"
 
-  _github_clone_with_reference_cache "$cache_base" "$askpass" \
-    && fail "expected non-zero return when reference clone fails" \
-    || true
+  if _github_clone_with_reference_cache "$cache_base" "$askpass"; then
+    fail "expected non-zero return when reference clone fails"
+  fi
 
   [ ! -d "$repo_dir" ] \
     || fail "repo_dir should be cleaned up after failed reference clone"
