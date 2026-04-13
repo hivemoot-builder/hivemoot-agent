@@ -216,6 +216,9 @@ _github_clone_with_reference_cache() {
   fi
 
   # Clone working copy with --reference so pack objects resolve from the mirror.
+  # --dissociate is intentionally omitted: this clone is ephemeral (deleted when
+  # the run completes), so the alternates dependency in .git/objects/info/alternates
+  # is never a problem. See git-clone(1) for --dissociate on persistent copies.
   local clone_args=(--single-branch --reference "$mirror_dir")
   local depth_label="full"
   if [ "${clone_depth:-0}" -gt 0 ]; then

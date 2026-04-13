@@ -554,7 +554,7 @@ run_success_case() {
     CODEX_AUTH_FILE="${codex_auth_source}" \
     GEMINI_AUTH_DIR="${gemini_auth_dir}" \
     GIT_CLONE_DEPTH="1" \
-    SHARED_CLONE_CACHE="0" \
+    GIT_CACHE_DIR="/tmp/test-git-cache" \
     PERIODIC_INTERVAL_SECS="60" \
     PERIODIC_JITTER_SECS="0" \
     bash "${repo_root}/scripts/controller.sh"
@@ -579,7 +579,7 @@ run_success_case() {
   assert_file_contains "$run_log" "-e JOB_ID="
   assert_file_contains "$run_log" "-e HIVEMOOT_CLI_UPDATE=skip"
   assert_file_contains "$run_log" "-e GIT_CLONE_DEPTH=1"
-  assert_file_contains "$run_log" "-e SHARED_CLONE_CACHE=0"
+  assert_file_contains "$run_log" "-e GIT_CACHE_DIR=/tmp/test-git-cache"
   assert_file_contains "$run_log" "-e AGENT_MEMORY_DIR=/home/node/.hivemoot/memory"
   assert_file_contains "$run_log" "/home/node/.hivemoot/memory"
   assert_file_not_contains "$settings_snapshot" "gemini_settings=missing"
