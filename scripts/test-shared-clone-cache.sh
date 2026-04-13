@@ -153,8 +153,9 @@ test_clone_creates_mirror() {
     || fail "clone_with_reference_cache returned non-zero"
 
   assert_called_with "clone --bare --mirror"
+  assert_called_with "config gc.auto 0"
   assert_called_with "--reference"
-  pass "clone_with_reference_cache issues git clone --bare --mirror then --reference"
+  pass "clone_with_reference_cache issues git clone --bare --mirror, sets gc.auto=0, then --reference"
 }
 
 test_clone_refreshes_existing_mirror() {
