@@ -1,3 +1,8 @@
 # exp:2026-06-30 - picomatch ReDoS (CVE-2026-33671) via @google/gemini-cli transitive dep
 # (fdir → picomatch). Fix requires gemini-cli upstream to bump to >= 4.0.4.
 CVE-2026-33671
+
+# exp:2026-06-30 - Go stdlib Root.Chmod symlink follow (CVE-2026-32282) in usr/bin/gh.
+# Fix requires gh to release a version compiled with Go >= 1.26.2. gh is installed from
+# the GitHub apt repo at "latest" — update will land automatically on next gh release.
+CVE-2026-32282
