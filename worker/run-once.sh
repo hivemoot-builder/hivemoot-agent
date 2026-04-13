@@ -245,6 +245,7 @@ workspace_root="${WORKSPACE_ROOT:-/workspace}"
 clone_depth="${GIT_CLONE_DEPTH:-50}"
 agent_skills="${AGENT_SKILLS:-}"
 agent_available_skills="${AGENT_AVAILABLE_SKILLS:-}"
+agent_mcp_plugins="${AGENT_MCP_PLUGINS:-}"
 extra_prompt="${AGENT_EXTRA_PROMPT:-}"
 extra_prompt_file="${AGENT_EXTRA_PROMPT_FILE:-}"
 agent_model="${AGENT_MODEL:-}"
@@ -378,6 +379,12 @@ if [ -n "$job_home" ]; then
 
   export HOME="$job_home"
   log "Job HOME set to: ${job_home}"
+fi
+
+# ── MCP Plugin Injection ──────────────────────────────────────────
+# Runs after HOME is resolved so provider config paths are correct.
+if [ -n "$agent_mcp_plugins" ]; then
+  load_agent_plugins "$agent_mcp_plugins" "${REPO_ROOT}/plugins" "$provider" "$HOME"
 fi
 
 inject_agent_memory() {

@@ -448,6 +448,166 @@ load_workload_integration_preflight() {
   . "$file"
 }
 
+# ── MCP Plugin Injection ──────────────────────────────────────────
+# Inject MCP server configs from plugin directories into provider config files.
+# Supports Claude, Gemini, OpenCode, Kilo (JSON merge) and Codex (TOML append).
+
+# Merge a JSON fragment into a provider JSON config file under config_key.
+# Creates the config file (with {}) if it doesn't exist.
+# Validates fragment and existing config before writing.
+# Writes atomically via a temp file + mv.
+inject_json_plugin_mcp() {
+  local fragment_file="$1" config_file="$2" config_key="$3"
+
+  local fragment
+  fragment="$(cat "$fragment_file")"
+
+  if ! printf '%s' "$fragment" | jq . >/dev/null 2>&1; then
+    echo "inject_plugin_mcp_config: invalid JSON fragment: ${fragment_file}" >&2
+    return 1
+  fi
+
+  if [ ! -f "$config_file" ]; then
+    mkdir -p "$(dirname "$config_file")"
+    printf '{}' > "$config_file"
+  fi
+
+  if ! jq . "$config_file" >/dev/null 2>&1; then
+    echo "inject_plugin_mcp_config: invalid JSON in config: ${config_file}" >&2
+    return 1
+  fi
+
+  local tmp
+  tmp="$(mktemp "${config_file}.XXXXXX")" || return 1
+  if ! jq --argjson frag "$fragment" ".${config_key} = ((.${config_key} // {}) * \$frag)" \
+      "$config_file" > "$tmp" 2>&1; then
+    rm -f "$tmp"
+    echo "inject_plugin_mcp_config: jq merge failed for ${config_file}" >&2
+    return 1
+  fi
+  mv "$tmp" "$config_file"
+}
+
+# Append a TOML MCP fragment to a Codex config file.
+# Checks each [mcp_servers.<name>] header in the fragment; if any already
+# appear in the config the entire append is skipped (idempotent for
+# mention-resume mode where load_agent_plugins may run twice per HOME).
+inject_codex_plugin_mcp() {
+  local fragment_file="$1" config_file="$2"
+
+  local headers
+  headers="$(grep -E '^\[mcp_servers\.' "$fragment_file" 2>/dev/null || true)"
+  [ -z "$headers" ] && return 0
+
+  if [ -f "$config_file" ]; then
+    local header
+    while IFS= read -r header; do
+      [ -z "$header" ] && continue
+      if grep -qF "$header" "$config_file" 2>/dev/null; then
+        return 0
+      fi
+    done <<< "$headers"
+  else
+    mkdir -p "$(dirname "$config_file")"
+  fi
+
+  cat "$fragment_file" >> "$config_file"
+}
+
+# Inject MCP config for a single plugin into a provider's config file.
+# plugin_dir: path to the plugin directory (contains plugin.yaml and mcp/)
+# provider:   one of claude, gemini, opencode, kilo, codex
+# agent_home: agent HOME; all config paths are resolved under it
+inject_plugin_mcp_config() {
+  local plugin_dir="$1" provider="$2" agent_home="$3"
+
+  local fragment_file config_file config_key
+
+  case "$provider" in
+    claude)
+      fragment_file="${plugin_dir}/mcp/claude.json"
+      config_file="${agent_home}/.claude.json"
+      config_key="mcpServers"
+      ;;
+    gemini)
+      fragment_file="${plugin_dir}/mcp/gemini.json"
+      config_file="${agent_home}/.gemini/settings.json"
+      config_key="mcpServers"
+      ;;
+    opencode)
+      fragment_file="${plugin_dir}/mcp/opencode.json"
+      config_file="${agent_home}/.config/opencode/config.json"
+      config_key="mcp"
+      ;;
+    kilo)
+      fragment_file="${plugin_dir}/mcp/kilo.json"
+      config_file="${agent_home}/.config/kilo/kilo.json"
+      config_key="mcp"
+      ;;
+    codex)
+      fragment_file="${plugin_dir}/mcp/codex.toml"
+      config_file="${agent_home}/.codex/config.toml"
+      ;;
+    *)
+      echo "inject_plugin_mcp_config: unsupported provider: ${provider}" >&2
+      return 1
+      ;;
+  esac
+
+  # Skip silently if this plugin has no fragment for this provider.
+  [ -f "$fragment_file" ] || return 0
+
+  # Guard: config path must be under agent_home to prevent path traversal
+  # from a malformed plugin.yaml that references an absolute path.
+  case "$config_file" in
+    "${agent_home}/"*) ;;
+    *)
+      echo "inject_plugin_mcp_config: config path outside agent_home: ${config_file}" >&2
+      return 1
+      ;;
+  esac
+
+  if [ "$provider" = "codex" ]; then
+    inject_codex_plugin_mcp "$fragment_file" "$config_file"
+  else
+    inject_json_plugin_mcp "$fragment_file" "$config_file" "$config_key"
+  fi
+}
+
+# Load MCP plugins for a provider from a comma-separated list of plugin names.
+# plugins_list: comma-separated names (e.g. "playwright,sqlite")
+# plugins_dir:  directory containing plugin subdirectories
+# provider:     target provider (claude, gemini, opencode, kilo, codex)
+# agent_home:   HOME directory for config path resolution
+load_agent_plugins() {
+  local plugins_list="$1" plugins_dir="$2" provider="$3" agent_home="$4"
+
+  [ -z "$plugins_list" ] && return 0
+
+  local plugin_name plugin_dir
+  # Convert commas to spaces; names validated against [a-zA-Z0-9_-]+ below.
+  local plugins_spaced
+  plugins_spaced="$(printf '%s' "$plugins_list" | tr ',' ' ')"
+
+  for plugin_name in $plugins_spaced; do
+    [ -z "$plugin_name" ] && continue
+
+    if ! printf '%s' "$plugin_name" | grep -Eq '^[a-zA-Z0-9_-]+$'; then
+      echo "load_agent_plugins: invalid plugin name: ${plugin_name}" >&2
+      return 1
+    fi
+
+    plugin_dir="${plugins_dir}/${plugin_name}"
+
+    if [ ! -f "${plugin_dir}/plugin.yaml" ]; then
+      echo "load_agent_plugins: plugin.yaml not found: ${plugin_dir}/plugin.yaml" >&2
+      return 1
+    fi
+
+    inject_plugin_mcp_config "$plugin_dir" "$provider" "$agent_home"
+  done
+}
+
 validate_workspace_root() {
   local workspace_root="$1"
 
