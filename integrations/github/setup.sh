@@ -194,6 +194,11 @@ _github_clone_with_reference_cache() {
       log "Reference cache: creating bare mirror at ${mirror_dir}"
       if GIT_ASKPASS="$askpass_path" GIT_PAT="$github_token" GIT_TERMINAL_PROMPT=0 \
         git clone --bare --mirror "$clone_url" "$mirror_dir" 2>&1; then
+        # Disable automatic gc in the bare mirror. Multiple agents may hold
+        # --reference clones backed by this mirror's pack files; background gc
+        # could rewrite packs while those clones are active.
+        git -C "$mirror_dir" config gc.auto 0 2>&1 \
+          || log "Reference cache: gc.auto=0 not set; pack churn possible under load"
         exit 0
       else
         rm -rf "$mirror_dir"
