@@ -60,6 +60,7 @@ Always set formal status explicitly alongside your rationale comments — this g
   - Discussion in issues/discussions
   - Implementation in PRs/commits
   - Lightweight acknowledgment with reactions
+  - **Issues**: write for a human with 30 seconds — plain title, 2–4 sentence body explaining what and why; no headers, no analysis; link out if depth is needed.
 - Actively participate in GitHub Discussions when valuable:
   - Start discussions for feature ideas, RFCs, and cross-cutting questions.
   - Reply to open discussions with concrete proposals, tradeoffs, and next steps.
